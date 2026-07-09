@@ -25,6 +25,7 @@ with open("settings.json", "r") as f:
 
 EXPRESSVPN_CMD = settings.get("EXPRESSVPN_CMD", "expressvpn")
 VPN_COUNTRY = settings.get("VPN_COUNTRY", "Netherlands").lower()
+NUMBER_OF_THREADS = int(settings.get("NUMBER_OF_THREADS", 1))
 
 
 def connect_vpn():
@@ -211,7 +212,9 @@ def extract_product_title(page_soup):
 
 
 def extract_product_company_name(page_soup):
-    PRODUCT_COMPANY_NAME_ELEMENT = 'span[class="company-name"]'
+    PRODUCT_COMPANY_NAME_ELEMENT = (
+        'div[data-module-name="module_unifed_company_card"] a[class*="id-underline"]'
+    )
     try:
         element = page_soup.select_one(PRODUCT_COMPANY_NAME_ELEMENT)
         return {
@@ -245,17 +248,64 @@ def extract_product_images(page_soup):
         }
 
 
+def extract_product_video(page_soup):
+    PRODUCT_VIDEOS_ELEMENT = 'div[class="detail-video-container"] video'
+    try:
+        videos = page_soup.select(PRODUCT_VIDEOS_ELEMENT)
+        urls = [
+            normalize_image_url(video.get("src"))
+            for video in videos
+            if video.get("src")
+        ]
+        return {
+            "status": True,
+            "data": urls,
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": [],
+            "error": str(exc),
+        }
+
+
 def extract_product_pricing_options(page_soup):
     PRICING_OPTIONS_ELEMENT = 'div[class="price-item"]'
+    PRICING_OPTION_ELEMENT = 'div[data-testid="ladder-price"]'
+
+    SHILLING_ELEMENT = 'span[class*="id-font-bold"]'
+    CENTS_ELEMENT = 'span[class*="id-font-semibold"]'
+
     try:
-        pricing_elements = page_soup.select(PRICING_OPTIONS_ELEMENT)
+        option_element = page_soup.select_one(PRICING_OPTION_ELEMENT)
+        if option_element:
+            pricing_elements = option_element.select(PRICING_OPTIONS_ELEMENT)
+        else:
+            pricing_elements = page_soup.select(PRICING_OPTIONS_ELEMENT)
+
         pricing_options = []
         for element in pricing_elements:
             div_children = [child for child in element.find_all("div", recursive=False)]
-            num_pieces = (
-                div_children[0].get_text(strip=True) if len(div_children) > 0 else None
+
+            styled_price_element = (
+                div_children[0].select(SHILLING_ELEMENT)
+                if len(div_children) > 0
+                else []
             )
-            price = (
+            if styled_price_element:
+                shillings = (
+                    div_children[0].select(SHILLING_ELEMENT)[0].get_text(strip=True)
+                )
+                cents = div_children[0].select(CENTS_ELEMENT)[-1].get_text(strip=True)
+                price = f"${shillings}.{cents}"
+            else:
+                price = (
+                    div_children[0].get_text(strip=True)
+                    if len(div_children) > 0
+                    else None
+                )
+            num_pieces = (
                 div_children[1].get_text(strip=True) if len(div_children) > 1 else None
             )
             pricing_options.append(
@@ -358,9 +408,22 @@ def extract_product_description_old(page_soup):
 
 def extract_product_description(page_soup, driver):
     PRODUCT_DESCRIPTION_ELEMENT = 'div[class="description-layout"]'
+    PRODUCT_DESCRIPTION_ELEMENT2 = 'div[class="module_structure_description"]'
+    PRODUCT_DESCRIPTION_ELEMENT3 = 'div[class="module_description"]'
+
     PRODUCT_DESCRIPTION_IFRAME_SELECTOR = 'div[class="description-layout"] iframe'
     try:
         element = page_soup.select_one(PRODUCT_DESCRIPTION_ELEMENT)
+        if not element:
+            element = page_soup.select_one(PRODUCT_DESCRIPTION_ELEMENT2)
+            PRODUCT_DESCRIPTION_IFRAME_SELECTOR = (
+                f"{PRODUCT_DESCRIPTION_ELEMENT2} iframe"
+            )
+        if not element:
+            element = page_soup.select_one(PRODUCT_DESCRIPTION_ELEMENT3)
+            PRODUCT_DESCRIPTION_IFRAME_SELECTOR = (
+                f"{PRODUCT_DESCRIPTION_ELEMENT3} iframe"
+            )
         description_text = None
         image_srcs = []
 
@@ -374,7 +437,7 @@ def extract_product_description(page_soup, driver):
                     driver.switch_to.frame(iframe_element)
                     iframe_html = driver.page_source
                     iframe_soup = bs4.BeautifulSoup(iframe_html, "html.parser")
-                    description_text = iframe_soup.get_text(separator=" ", strip=True)
+                    description_text = iframe_soup.get_text(separator="\n", strip=True)
                     image_srcs = [
                         normalize_image_url(img.get("src"))
                         for img in iframe_soup.select("img")
@@ -383,7 +446,7 @@ def extract_product_description(page_soup, driver):
                 finally:
                     driver.switch_to.default_content()
             else:
-                description_text = element.get_text(separator=" ", strip=True)
+                description_text = element.get_text(separator="\n", strip=True)
                 image_srcs = [
                     normalize_image_url(img.get("src"))
                     for img in element.select("img")
@@ -413,6 +476,78 @@ def extract_product_description(page_soup, driver):
         }
 
 
+def extract_customization_options(driver):
+    CUSTOM_SECTION_ELEMENT = 'div[data-auto-exp="skuCustomizationChoices"]'
+    OPTION_GROUP_SELECTOR = 'div[class="id-mb-2"]'
+    OPTION_DATA_ELEMENT = (
+        'div[class*="id-overflow-hidden id-overflow-ellipsis id-whitespace-nowrap"]'
+    )
+    try:
+        wait = WebDriverWait(driver, 3)
+        custom_section = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, CUSTOM_SECTION_ELEMENT))
+        )
+
+        customization_options = {}
+        option_groups = custom_section.find_elements(
+            By.CSS_SELECTOR, OPTION_GROUP_SELECTOR
+        )
+        for group in option_groups:
+            group_data = {}
+            image_src = ""
+            group_name = group.text.strip()
+            if not group_name:
+                continue
+
+            # option_elements = all following sibling divs till one like option OPTION_GROUP_SELECTOR
+
+            option_elements = group.find_elements(
+                By.XPATH, "./following-sibling::div[1]"
+            )
+
+            option_element = option_elements[0]
+
+            option_image_element = option_element.find_element(By.CSS_SELECTOR, "img")
+            if option_image_element:
+                image_src = option_image_element.get_attribute("src")
+
+            group_data["image_url"] = image_src
+
+            option_data_element = option_element.find_elements(
+                By.CSS_SELECTOR, OPTION_DATA_ELEMENT
+            )
+
+            option_name = ""
+            option_details = ""
+            if option_data_element:
+                option_name = (
+                    option_data_element[0].text.strip() if option_data_element else None
+                )
+
+                if len(option_data_element) > 1:
+                    option_details = (
+                        option_data_element[1].text.strip()
+                        if len(option_data_element) > 1
+                        else None
+                    )
+
+            group_data["option_name"] = option_name
+            group_data["option_details"] = option_details
+
+            customization_options[group_name] = group_data
+        return {
+            "status": True,
+            "data": customization_options,
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": {},
+            "error": str(exc),
+        }
+
+
 def extract_product_variations(driver):
     VARIATIONS_BUTTON_SELECTOR = 'a[data-testid="sku-action"]'
     VARIATIONS_DIALOG_SELECTOR = 'div[role="dialog"]'
@@ -422,7 +557,7 @@ def extract_product_variations(driver):
     VARIATION_OPTION_NAME_SELECTOR = "div:nth-child(1) > div:nth-child(1) span"
 
     try:
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, 5)
         open_button = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, VARIATIONS_BUTTON_SELECTOR))
         )
@@ -449,6 +584,7 @@ def extract_product_variations(driver):
             variation_name = (
                 variation_name_element.text.strip() if variation_name_element else None
             )
+            # print(f"Variation Name: {variation_name}")
             if not variation_name:
                 continue
 
@@ -456,14 +592,22 @@ def extract_product_variations(driver):
                 By.CSS_SELECTOR, VARIATION_OPTION_SELECTOR
             )
             option_map = {}
-            for option in option_elements:
+            for i, option in enumerate(option_elements):
                 option_divs = option.find_elements(
                     By.CSS_SELECTOR, VARIATION_OPTION_NAME_SELECTOR
                 )
                 option_label = (
-                    option_divs[0].text.strip() if len(option_divs) > 0 else None
+                    option_divs[0].text.strip()
+                    if len(option_divs) > 0
+                    else f"option_{i + 1}"
                 )
                 price = None
+                try:
+                    image = option.find_element(By.TAG_NAME, "img")
+                    image_url = image.get_attribute("src") if image else None
+                except Exception:
+                    image_url = None
+                # print(f"Option Label: {option_label}, Image URL: {image_url}")
                 try:
                     price_span = option.find_element(
                         By.CSS_SELECTOR, 'div:nth-child(2) span[data-testid="price"]'
@@ -477,9 +621,11 @@ def extract_product_variations(driver):
                         price = price_spans[0].text.strip()
 
                 if option_label:
-                    option_map[option_label] = price
+                    option_map[option_label] = {"price": price, "image_url": image_url}
 
             variations[variation_name] = option_map
+
+        customization_result = extract_customization_options(driver)
 
         close_button = dialog.find_element(
             By.CSS_SELECTOR, VARIATIONS_DIALOG_CLOSE_SELECTOR
@@ -487,9 +633,15 @@ def extract_product_variations(driver):
         if close_button:
             close_button.click()
 
+        time.sleep(1)
+        return_data = {}
+        return_data["variations"] = variations
+        if customization_result.get("status"):
+            return_data["customization_options"] = customization_result.get("data")
+
         return {
             "status": True,
-            "data": variations,
+            "data": return_data,
             "error": "none",
         }
     except Exception as exc:
@@ -502,12 +654,13 @@ def extract_product_variations(driver):
 
 def extract_product_data(url):
     """Load a product page and extract all product data."""
-    driver = None
+    # driver = None
     try:
         driver = create_driver()
         driver.get(url)
 
         # scroll_to_bottom
+        time.sleep(2)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
         wait = WebDriverWait(driver, 10)
@@ -521,21 +674,24 @@ def extract_product_data(url):
         title_result = extract_product_title(page_soup)
         company_result = extract_product_company_name(page_soup)
         images_result = extract_product_images(page_soup)
+        videos_result = extract_product_video(page_soup)
         pricing_result = extract_product_pricing_options(page_soup)
         shipping_result = extract_product_shipping_fee(page_soup)
         attributes_result = extract_product_attributes(page_soup)
         description_result = extract_product_description(page_soup, driver)
+
         variations_result = extract_product_variations(driver)
 
         results = {
             "product_title": title_result.get("data"),
             "company_name": company_result.get("data"),
             "product_images": images_result.get("data"),
+            "product_videos": videos_result.get("data"),
             "pricing_options": pricing_result.get("data"),
             "shipping_fee": shipping_result.get("data"),
             "product_attributes": attributes_result.get("data"),
             "product_description": description_result.get("data"),
-            "product_variations": variations_result.get("data"),
+            "product_variations_and_customization": variations_result.get("data"),
         }
 
         status = all(
@@ -583,6 +739,7 @@ def extract_product_data(url):
         if driver:
             try:
                 driver.quit()
+                pass
             except Exception:
                 pass
 
@@ -651,42 +808,261 @@ def extract_categories(driver):
         }
 
 
-url = "https://nbbsj.en.alibaba.com/productlist.html"
-# driver = create_driver()
-# driver.get(url)
-
-# soup = driver.get_page_source()
-# bs = bs4.BeautifulSoup(soup, "html.parser")
-
-# result = extract_item_soup(bs)
-
-# elemento = result.get("data")[1]
-# extract_data_from_result_page_item(elemento)
-
-# time.sleep(2)
-# click_next_pagination_btn(driver)
+def get_page_soup(driver):
+    """Return a BeautifulSoup object for the current browser page."""
+    try:
+        wait = WebDriverWait(driver, 10)
+        wait.until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except Exception:
+        pass
+    return bs4.BeautifulSoup(driver.page_source, "html.parser")
 
 
-# from curl_cffi import requests
+def extract_company_data_by_categories(company_url):
+    """Scrape product items for each category on a company listing page."""
+    driver = None
+    collected_data = {}
 
-# resp = requests.get("https://www.alibaba.com/product-detail/Heavy-Duty-Stainless-Steel-Commercial-Rotisserie_1600058811527.html")
+    try:
+        driver = create_driver()
+        driver.get(company_url)
+        time.sleep(2)
 
-# time.sleep(3)
-# x = extract_product_variations(driver)
-# x
+        categories_result = extract_categories(driver)
+        if not categories_result.get("status"):
+            return {
+                "status": False,
+                "data": {},
+                "error": categories_result.get("error", "failed to extract categories"),
+            }
 
-# driver.switch_to.window(driver.window_handles[0])
-# Hi,cutie* " I like your bum, it's sexy"
-# "*Write a letter to my man, make it steamy as fuck*"
-# "hello world bitcheesssssssssss"
+        category_names = list(categories_result.get("data", {}).keys())
+        if not category_names:
+            return {
+                "status": False,
+                "data": {},
+                "error": "no categories found",
+            }
 
-# x = "my_baby_is_Derrick"
+        for category_name in category_names:
+            try:
+                refreshed_categories = extract_categories(driver)
+                if not refreshed_categories.get("status"):
+                    raise RuntimeError(
+                        refreshed_categories.get(
+                            "error", "failed to refresh categories"
+                        )
+                    )
 
-# x
+                category_element = refreshed_categories.get("data", {}).get(
+                    category_name
+                )
+                if category_element is None:
+                    collected_data[category_name] = {
+                        "item_count": 0,
+                        "items": [],
+                        "error": "category element not found",
+                    }
+                    continue
 
-url = "https://www.alibaba.com/product-detail/BENSUN-Barbecue-Grill-Cleaning-Tool-Wire_1600927884407.html?spm=a2700.shop_pl.41413.203.3dcf2e4cum3Yzw"
-dta = extract_product_data(url)
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+                    category_element,
+                )
+                category_element.click()
+                time.sleep(2)
 
-dta
+                category_items = []
+                while True:
+                    page_soup = get_page_soup(driver)
+                    items_result = extract_result_items_from_soup(page_soup)
+                    if items_result.get("status"):
+                        for item in items_result.get("data", []):
+                            extracted_item = extract_data_from_result_page_item(item)
+                            if extracted_item.get("status"):
+                                category_items.append(extracted_item.get("data"))
+                            else:
+                                category_items.append(
+                                    {"error": extracted_item.get("error")}
+                                )
 
-# driver.get(url)
+                    next_result = click_next_pagination_btn(driver)
+                    if not next_result.get("status"):
+                        break
+
+                collected_data[category_name] = {
+                    "item_count": len(category_items),
+                    "items": category_items,
+                }
+            except Exception as exc:
+                collected_data[category_name] = {
+                    "item_count": 0,
+                    "items": [],
+                    "error": str(exc),
+                }
+
+            try:
+                driver.get(company_url)
+                time.sleep(2)
+            except Exception:
+                pass
+
+        return {
+            "status": True,
+            "data": collected_data,
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": {},
+            "error": str(exc),
+        }
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def _safe_name(value, fallback="item"):
+    """Create a filesystem-safe name from a string."""
+    if not value:
+        return fallback
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
+    return cleaned[:80] or fallback
+
+
+def _append_log_entry(log_path, lock, status, item_name, item_url, error):
+    """Append a structured line to the log file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = (
+        f"{timestamp} | {status} | {item_name or 'N/A'} | {item_url or 'N/A'} | "
+        f"{error or 'none'}\n"
+    )
+    with lock:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+
+
+def _process_category_item(item_payload, category_name, output_dir, log_path, lock):
+    """Extract a single product item and persist its data."""
+    item_name = None
+    item_url = None
+
+    if isinstance(item_payload, dict):
+        item_name = item_payload.get("item_name")
+        item_url = item_payload.get("item_url")
+
+    try:
+        if not item_url:
+            raise ValueError("missing item url")
+
+        extraction_result = extract_product_data(item_url)
+        if not extraction_result.get("status"):
+            raise RuntimeError(extraction_result.get("error", "extraction failed"))
+
+        category_dir = os.path.join(output_dir, _safe_name(category_name, "category"))
+        os.makedirs(category_dir, exist_ok=True)
+
+        file_name = f"{_safe_name(item_name or item_url, 'item')}.json"
+        output_path = os.path.join(category_dir, file_name)
+        payload = {
+            "category": category_name,
+            "item": item_payload,
+            "extracted_data": extraction_result.get("data", {}),
+            "status": extraction_result.get("status"),
+            "error": extraction_result.get("error"),
+        }
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+
+        _append_log_entry(log_path, lock, "success", item_name, item_url, "none")
+        return {
+            "status": "success",
+            "category": category_name,
+            "item_name": item_name,
+            "item_url": item_url,
+            "file": output_path,
+        }
+    except Exception as exc:
+        _append_log_entry(log_path, lock, "fail", item_name, item_url, str(exc))
+        return {
+            "status": "fail",
+            "category": category_name,
+            "item_name": item_name,
+            "item_url": item_url,
+            "error": str(exc),
+        }
+
+
+def extract_company_items_data(extracted_company_data_by_categories):
+    """Extract each item from category results using multiple threads."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(base_dir, "extracted_data")
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(base_dir, "log.txt")
+    if not os.path.exists(log_path):
+        with open(log_path, "w", encoding="utf-8"):
+            pass
+
+    if (
+        isinstance(extracted_company_data_by_categories, dict)
+        and "data" in extracted_company_data_by_categories
+    ):
+        category_payload = extracted_company_data_by_categories.get("data", {})
+    else:
+        category_payload = extracted_company_data_by_categories or {}
+
+    tasks = []
+    for category_name, category_data in category_payload.items():
+        items = []
+        if isinstance(category_data, dict):
+            items = category_data.get("items", [])
+        elif isinstance(category_data, list):
+            items = category_data
+
+        for item_payload in items:
+            if isinstance(item_payload, dict):
+                tasks.append((category_name, item_payload))
+
+    lock = threading.Lock()
+    results = {"status": True, "data": {}, "error": "none"}
+
+    if not tasks:
+        return results
+
+    with ThreadPoolExecutor(max_workers=NUMBER_OF_THREADS) as executor:
+        futures = [
+            executor.submit(
+                _process_category_item,
+                item_payload,
+                category_name,
+                output_dir,
+                log_path,
+                lock,
+            )
+            for category_name, item_payload in tasks
+        ]
+
+        for future in futures:
+            item_result = future.result()
+            category_name = item_result.get("category")
+            if category_name not in results["data"]:
+                results["data"][category_name] = {"success": [], "fail": []}
+            results["data"][category_name][
+                "success" if item_result.get("status") == "success" else "fail"
+            ].append(item_result)
+
+    return results
+
+
+if __name__ == "__main__":
+    company_url = "https://nbbsj.en.alibaba.com/productlist.html"
+    connect_vpn()
+    category_result = extract_company_data_by_categories(company_url)
+    item_result = extract_company_items_data(category_result)
+    print(json.dumps(item_result, indent=2, ensure_ascii=False))

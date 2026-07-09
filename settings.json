@@ -1,4 +1,5 @@
 {
   "EXPRESSVPN_CMD": "C:\\Program Files (x86)\\ExpressVPN\\services\\ExpressVPN.CLI.exe",
-  "VPN_COUNTRY": "USA"
+  "VPN_COUNTRY": "USA",
+  "NUMBER_OF_THREADS": 1
 }
