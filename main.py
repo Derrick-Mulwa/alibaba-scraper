@@ -826,6 +826,7 @@ def extract_company_data_by_categories(company_url):
     collected_data = {}
 
     try:
+        print(f"Extracting company data by categories from: {company_url}")
         driver = create_driver()
         driver.get(company_url)
         time.sleep(2)
@@ -848,6 +849,7 @@ def extract_company_data_by_categories(company_url):
 
         for category_name in category_names:
             try:
+                print(f"Extracting items for category: {category_name}")
                 refreshed_categories = extract_categories(driver)
                 if not refreshed_categories.get("status"):
                     raise RuntimeError(
@@ -896,12 +898,18 @@ def extract_company_data_by_categories(company_url):
                     "item_count": len(category_items),
                     "items": category_items,
                 }
+                print(
+                    f"Extracted {len(category_items)} items for category: {category_name}"
+                )
             except Exception as exc:
                 collected_data[category_name] = {
                     "item_count": 0,
                     "items": [],
                     "error": str(exc),
                 }
+                print(
+                    f"Failed to extract items for category: {category_name}. Error: {exc}"
+                )
 
             try:
                 driver.get(company_url)
@@ -961,6 +969,7 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         if not item_url:
             raise ValueError("missing item url")
 
+        print(f"Extracting data for item: {item_name or item_url}")
         extraction_result = extract_product_data(item_url)
         if not extraction_result.get("status"):
             raise RuntimeError(extraction_result.get("error", "extraction failed"))
@@ -981,6 +990,7 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
             json.dump(payload, handle, indent=2, ensure_ascii=False)
 
         _append_log_entry(log_path, lock, "success", item_name, item_url, "none")
+        print(f"Data extracted successfully for item: {item_name or item_url}")
         return {
             "status": "success",
             "category": category_name,
@@ -990,6 +1000,7 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         }
     except Exception as exc:
         _append_log_entry(log_path, lock, "fail", item_name, item_url, str(exc))
+        print(f"Failed to extract data for item: {item_name or item_url}")
         return {
             "status": "fail",
             "category": category_name,
