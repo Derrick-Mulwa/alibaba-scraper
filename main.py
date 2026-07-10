@@ -5,6 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from urllib.parse import urlparse
 
 from seleniumbase import Driver
 import pandas as pd
@@ -944,6 +945,53 @@ def _safe_name(value, fallback="item"):
     return cleaned[:80] or fallback
 
 
+def load_company_urls():
+    """Load company URLs from companies.txt."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    companies_path = os.path.join(base_dir, "companies.txt")
+    if not os.path.exists(companies_path):
+        return []
+
+    urls = []
+    with open(companies_path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            for fragment in re.split(r"[\n,]+", line):
+                candidate = fragment.strip().strip("\"'")
+                if candidate.startswith(("http://", "https://")):
+                    urls.append(candidate)
+
+    return list(dict.fromkeys(urls))
+
+
+def _company_slug_from_url(company_url):
+    """Create a readable folder name from a company URL."""
+    if not company_url:
+        return "company"
+
+    parsed = urlparse(company_url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname:
+        host_parts = [
+            part for part in hostname.split(".") if part and part not in {"www", "en"}
+        ]
+        if host_parts:
+            return _safe_name(host_parts[0], "company")
+
+    path_parts = [
+        part
+        for part in parsed.path.split("/")
+        if part and part not in {"productlist.html", "productlist"}
+    ]
+    if path_parts:
+        return _safe_name(path_parts[0], "company")
+
+    return "company"
+
+
 def _append_log_entry(log_path, lock, status, item_name, item_url, error):
     """Append a structured line to the log file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1010,12 +1058,13 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         }
 
 
-def extract_company_items_data(extracted_company_data_by_categories):
+def extract_company_items_data(extracted_company_data_by_categories, company_url=None):
     """Extract each item from category results using multiple threads."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(base_dir, "extracted_data")
+    company_slug = _company_slug_from_url(company_url)
+    output_dir = os.path.join(base_dir, "extracted_data", company_slug)
     os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(base_dir, "log.txt")
+    log_path = os.path.join(output_dir, "log.txt")
     if not os.path.exists(log_path):
         with open(log_path, "w", encoding="utf-8"):
             pass
@@ -1072,8 +1121,18 @@ def extract_company_items_data(extracted_company_data_by_categories):
 
 
 if __name__ == "__main__":
-    company_url = "https://nbbsj.en.alibaba.com/productlist.html"
+    company_urls = load_company_urls()
+    if not company_urls:
+        raise SystemExit("No company URLs found in companies.txt")
+
     connect_vpn()
-    category_result = extract_company_data_by_categories(company_url)
-    item_result = extract_company_items_data(category_result)
-    print(json.dumps(item_result, indent=2, ensure_ascii=False))
+    all_results = []
+    for company_url in company_urls:
+        print(f"Processing company: {company_url}")
+        category_result = extract_company_data_by_categories(company_url)
+        item_result = extract_company_items_data(
+            category_result, company_url=company_url
+        )
+        all_results.append({"company_url": company_url, "result": item_result})
+
+    print(json.dumps(all_results, indent=2, ensure_ascii=False))
