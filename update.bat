@@ -2,7 +2,6 @@
 setlocal
 
 echo Pulling latest code...
-git reset --hard origin/main
 git pull origin main
 
 REM 1. Check if Python 3.11 is installed
