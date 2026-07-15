@@ -1061,26 +1061,26 @@ def extract_product_data(url):
             title_result = extract_product_title(page_soup)
 
         # Extract all data
-        print("Extracted title")
+        # print("Extracted title")
         company_result = extract_product_company_name(page_soup)
-        print("Extracted company name")
+        # print("Extracted company name")
         images_result = extract_product_images(page_soup)
-        print("Extracted images")
+        # print("Extracted images")
         videos_result = extract_product_video(page_soup)
-        print("Extracted videos")
+        # print("Extracted videos")
         pricing_result = extract_product_pricing_options(page_soup)
-        print("Extracted pricing options")
+        # print("Extracted pricing options")
         shipping_result = extract_product_shipping_fee(page_soup)
-        print("Extracted shipping fee")
+        # print("Extracted shipping fee")
         attributes_result = extract_product_attributes(page_soup)
-        print("Extracted attributes")
+        # print("Extracted attributes")
         description_result = extract_product_description(page_soup, driver)
-        print("Extracted description")
+        # print("Extracted description")
 
         variations_result = extract_product_variations(driver)
-        print("Extracted variations")
+        # print("Extracted variations")
         faq_result = get_faq_content(driver)
-        print("Extracted FAQ content")
+        # print("Extracted FAQ content")
 
         results = {
             "product_title": title_result.get("data"),
@@ -1094,7 +1094,7 @@ def extract_product_data(url):
             "product_variations_and_customization": variations_result.get("data"),
             "faq_content": faq_result.get("data"),
         }
-        print("Extracted all product data")
+        # print("Extracted all product data")
 
         status = all(
             result.get("status", False)
@@ -1269,6 +1269,7 @@ def extract_company_data_by_categories(company_url):
                     "data": {},
                     "error": "all_items_scraped",
                 }
+
         driver = create_driver()
         driver.get(company_url)
         time.sleep(2)
@@ -1618,7 +1619,7 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
     return results
 
 
-if __name__ == "__main__":
+if __name__ != "__main__":
     company_urls = load_company_urls()
     if not company_urls:
         raise SystemExit("No company URLs found in companies.txt")
