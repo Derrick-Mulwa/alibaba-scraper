@@ -1,3 +1,4 @@
+selenium
 seleniumbase
 pandas
 curl-cffi
