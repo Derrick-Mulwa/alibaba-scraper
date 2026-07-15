@@ -1348,9 +1348,7 @@ def extract_company_data_by_categories(company_url):
                             if isinstance(it, dict) and it.get("item_url")
                         ]
                         if item_urls:
-                            add_category_entries(
-                                company_url, "", category_name, item_urls
-                            )
+                            add_category_entries(company_url, category_name, item_urls)
                     except Exception as e:
                         print(f"Warning: failed to add category entries to CSV: {e}")
                     print(
