@@ -1619,7 +1619,7 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
     return results
 
 
-if __name__ != "__main__":
+if __name__ == "__main__":
     company_urls = load_company_urls()
     if not company_urls:
         raise SystemExit("No company URLs found in companies.txt")
