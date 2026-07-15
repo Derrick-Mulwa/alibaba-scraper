@@ -36,6 +36,7 @@ NUMBER_OF_THREADS = int(settings.get("NUMBER_OF_THREADS", 1))
 VPN_RECONNECT_INTERVAL = int(
     settings.get("VPN_RECONNECT_INTERVAL", 20)
 )  # Reconnect every N items
+TRACKING_CSV_PATH = os.path.abspath("./utils/scrape_tracking.csv")
 
 # VPN continent rotation list for handling shipping region errors
 VPN_CONTINENTS = [
@@ -137,10 +138,6 @@ def connect_vpn(country=VPN_COUNTRY):
         return True
     except:
         return False
-
-
-# --- Scrape tracking CSV helpers ---
-TRACKING_CSV_PATH = Path("scrape_tracking.csv")
 
 
 def init_tracking_csv(path=TRACKING_CSV_PATH):
@@ -1291,82 +1288,97 @@ def extract_company_data_by_categories(company_url):
             }
 
         for category_name in category_names:
-            try:
-                print(f"Extracting items for category: {category_name}")
-                refreshed_categories = extract_categories(driver)
-                if not refreshed_categories.get("status"):
-                    raise RuntimeError(
-                        refreshed_categories.get(
-                            "error", "failed to refresh categories"
-                        )
-                    )
-
-                category_element = refreshed_categories.get("data", {}).get(
-                    category_name
-                )
-                if category_element is None:
-                    collected_data[category_name] = {
-                        "item_count": 0,
-                        "items": [],
-                        "error": "category element not found",
-                    }
-                    continue
-
-                driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
-                    category_element,
-                )
-                category_element.click()
-                time.sleep(2)
-
-                category_items = []
-                while True:
-                    page_soup = get_page_soup(driver)
-                    items_result = extract_result_items_from_soup(page_soup)
-                    if items_result.get("status"):
-                        for item in items_result.get("data", []):
-                            extracted_item = extract_data_from_result_page_item(item)
-                            if extracted_item.get("status"):
-                                category_items.append(extracted_item.get("data"))
-                            else:
-                                category_items.append(
-                                    {"error": extracted_item.get("error")}
-                                )
-
-                    next_result = click_next_pagination_btn(driver)
-                    if not next_result.get("status"):
-                        break
-
-                collected_data[category_name] = {
-                    "item_count": len(category_items),
-                    "items": category_items,
-                }
+            attempt = 0
+            while attempt < 3:
                 try:
-                    # Register category item URLs in tracking CSV to avoid re-scraping categories next run
-                    item_urls = [
-                        {
-                            "item_url": it.get("item_url"),
-                            "item_name": it.get("item_name"),
+                    print(f"Extracting items for category: {category_name}")
+                    refreshed_categories = extract_categories(driver)
+                    if not refreshed_categories.get("status"):
+                        raise RuntimeError(
+                            refreshed_categories.get(
+                                "error", "failed to refresh categories"
+                            )
+                        )
+
+                    category_element = refreshed_categories.get("data", {}).get(
+                        category_name
+                    )
+                    if category_element is None:
+                        raise RuntimeError("category element not found")
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+                        category_element,
+                    )
+                    category_element.click()
+                    time.sleep(2)
+
+                    category_items = []
+                    while True:
+                        page_soup = get_page_soup(driver)
+                        items_result = extract_result_items_from_soup(page_soup)
+                        if items_result.get("status"):
+                            for item in items_result.get("data", []):
+                                extracted_item = extract_data_from_result_page_item(
+                                    item
+                                )
+                                if extracted_item.get("status"):
+                                    category_items.append(extracted_item.get("data"))
+                                else:
+                                    category_items.append(
+                                        {"error": extracted_item.get("error")}
+                                    )
+
+                        next_result = click_next_pagination_btn(driver)
+                        if not next_result.get("status"):
+                            break
+
+                    collected_data[category_name] = {
+                        "item_count": len(category_items),
+                        "items": category_items,
+                    }
+                    try:
+                        # Register category item URLs in tracking CSV to avoid re-scraping categories next run
+                        item_urls = [
+                            {
+                                "item_url": it.get("item_url"),
+                                "item_name": it.get("item_name"),
+                            }
+                            for it in category_items
+                            if isinstance(it, dict) and it.get("item_url")
+                        ]
+                        if item_urls:
+                            add_category_entries(
+                                company_url, "", category_name, item_urls
+                            )
+                    except Exception as e:
+                        print(f"Warning: failed to add category entries to CSV: {e}")
+                    print(
+                        f"Extracted {len(category_items)} items for category: {category_name}"
+                    )
+                    break
+                except Exception as exc:
+                    attempt += 1
+                    print(
+                        f"Attempt {attempt}/3 failed for category {category_name}: {exc}"
+                    )
+                    if attempt >= 3:
+                        collected_data[category_name] = {
+                            "item_count": 0,
+                            "items": [],
+                            "error": str(exc),
                         }
-                        for it in category_items
-                        if isinstance(it, dict) and it.get("item_url")
-                    ]
-                    if item_urls:
-                        add_category_entries(company_url, "", category_name, item_urls)
-                except Exception as e:
-                    print(f"Warning: failed to add category entries to CSV: {e}")
-                print(
-                    f"Extracted {len(category_items)} items for category: {category_name}"
-                )
-            except Exception as exc:
-                collected_data[category_name] = {
-                    "item_count": 0,
-                    "items": [],
-                    "error": str(exc),
-                }
-                print(
-                    f"Failed to extract items for category: {category_name}. Error: {exc}"
-                )
+                        print(
+                            f"Failed to extract items for category: {category_name}. Error: {exc}"
+                        )
+                    else:
+                        try:
+                            driver.get(company_url)
+                            time.sleep(2)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                        continue
 
             try:
                 driver.get(company_url)
@@ -1620,6 +1632,7 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
 
 
 if __name__ == "__main__":
+    # if __name__ != "__main__":
     company_urls = load_company_urls()
     if not company_urls:
         raise SystemExit("No company URLs found in companies.txt")
@@ -1644,5 +1657,5 @@ if __name__ == "__main__":
 # data = extract_product_data(url)
 # data
 
-
+# company_url = company_urls[0]
 # get_faq_content(driver)
