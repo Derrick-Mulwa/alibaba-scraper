@@ -2,3 +2,4 @@
 __pycache__/
 extracted_data/
 */companies.txt
+scrape_tracking.csv

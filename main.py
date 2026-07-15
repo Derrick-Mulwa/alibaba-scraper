@@ -20,6 +20,8 @@ import re
 import json
 import subprocess
 import bs4
+import csv
+from pathlib import Path
 
 import random
 
@@ -137,6 +139,154 @@ def connect_vpn(country=VPN_COUNTRY):
         return False
 
 
+# --- Scrape tracking CSV helpers ---
+TRACKING_CSV_PATH = Path("scrape_tracking.csv")
+
+
+def init_tracking_csv(path=TRACKING_CSV_PATH):
+    path = Path(path)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "company_url",
+                    "item_name",
+                    "category",
+                    "item_url",
+                    "scrape_status",
+                    "error",
+                    "scrape_result",
+                ]
+            )
+    return path
+
+
+def load_tracking_df(path=TRACKING_CSV_PATH):
+    path = init_tracking_csv(path)
+    # Read CSV then normalize required columns and boolean flags
+    try:
+        df = pd.read_csv(path, dtype=str)
+    except Exception:
+        df = pd.DataFrame()
+
+    required_cols = [
+        "company_url",
+        "item_name",
+        "category",
+        "item_url",
+        "scrape_status",
+        "error",
+        "scrape_result",
+    ]
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = "" if col not in ("scrape_status", "error") else False
+
+    def _to_bool(v):
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        return True if s in ("true", "1", "t", "yes") else False
+
+    # Normalize boolean-like columns
+    df["scrape_status"] = df["scrape_status"].apply(_to_bool)
+    df["error"] = df["error"].apply(_to_bool)
+
+    return df
+
+
+def save_tracking_df(df, path=TRACKING_CSV_PATH):
+    path = init_tracking_csv(path)
+    df.to_csv(path, index=False, encoding="utf-8")
+
+
+def add_category_entries(company_url, category, item_urls, path=TRACKING_CSV_PATH):
+    """Add rows for category items if not already present.
+
+    item_urls: iterable of item_url strings
+    """
+    df = load_tracking_df(path)
+    new_rows = []
+    for item in item_urls:
+        # support either simple item_url strings or dicts with item_url/item_name
+        if isinstance(item, dict):
+            item_url = item.get("item_url") or item.get("url")
+            item_name = item.get("item_name") or item.get("name") or ""
+        else:
+            item_url = item
+            item_name = ""
+
+        if not item_url:
+            continue
+
+        if not (
+            (df["company_url"] == company_url) & (df["item_url"] == item_url)
+        ).any():
+            new_rows.append(
+                {
+                    "company_url": company_url,
+                    "item_name": item_name,
+                    "category": category,
+                    "item_url": item_url,
+                    "scrape_status": False,
+                    "error": False,
+                    "scrape_result": "",
+                }
+            )
+    if new_rows:
+        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        save_tracking_df(df, path)
+
+
+def update_item_status(
+    company_url,
+    item_url,
+    scraped=True,
+    error=False,
+    scrape_result="",
+    path=TRACKING_CSV_PATH,
+):
+    """Update a single item's scrape status and metadata."""
+    df = load_tracking_df(path)
+    mask = (df["company_url"] == company_url) & (df["item_url"] == item_url)
+    if mask.any():
+        df.loc[mask, "scrape_status"] = bool(scraped)
+        df.loc[mask, "error"] = bool(error)
+        df.loc[mask, "scrape_result"] = scrape_result
+        save_tracking_df(df, path)
+        return True
+    else:
+        # If the item isn't present yet, append it with provided status
+        row = {
+            "company_url": company_url,
+            "item_name": "",
+            "category": "",
+            "item_url": item_url,
+            "scrape_status": bool(scraped),
+            "error": bool(error),
+            "scrape_result": scrape_result,
+        }
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        save_tracking_df(df, path)
+        return True
+
+
+def get_pending_items_for_company(company_url, path=TRACKING_CSV_PATH):
+    """Return list of dict rows where scrape_status is False for given company_url."""
+    df = load_tracking_df(path)
+    if "scrape_status" not in df.columns:
+        return []
+    pending = df[(df["company_url"] == company_url) & (~df["scrape_status"])].copy()
+    return pending.to_dict(orient="records")
+
+
+def has_items_for_company(company_url, path=TRACKING_CSV_PATH):
+    df = load_tracking_df(path)
+    return (df["company_url"] == company_url).any()
+
+
 def create_driver():
     """Create and return a maximized SeleniumBase Driver."""
     driver = Driver()
@@ -172,7 +322,7 @@ def extract_result_items_from_soup(page_soup):
         return {
             "status": False,
             "data": [],
-            "error": str(exc),
+            "error": f"extract_result_items_from_soup: {str(exc)}",
         }
 
 
@@ -183,7 +333,7 @@ def extract_data_from_result_page_item(element):
             return {
                 "status": False,
                 "data": {},
-                "error": "Element is None",
+                "error": "extract_data_from_result_page_item: Element is None",
             }
 
         ITEM_NAME_SELECTOR = "span.title-con"
@@ -211,7 +361,7 @@ def extract_data_from_result_page_item(element):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"extract_data_from_result_page_item: {str(exc)}",
         }
 
 
@@ -237,7 +387,7 @@ def shipping_region_error(page_soup):
         return {
             "status": False,
             "data": None,
-            "error": str(exc),
+            "error": f"shipping_region_error: {str(exc)}",
         }
 
 
@@ -254,7 +404,7 @@ def extract_product_title(page_soup):
         return {
             "status": False,
             "data": None,
-            "error": str(exc),
+            "error": f"extract_product_title: {str(exc)}",
         }
 
 
@@ -273,7 +423,7 @@ def extract_product_company_name(page_soup):
         return {
             "status": False,
             "data": None,
-            "error": str(exc),
+            "error": f"extract_product_company_name: {str(exc)}",
         }
 
 
@@ -291,7 +441,7 @@ def extract_product_images(page_soup):
         return {
             "status": False,
             "data": [],
-            "error": str(exc),
+            "error": f"extract_product_images: {str(exc)}",
         }
 
 
@@ -313,7 +463,7 @@ def extract_product_video(page_soup):
         return {
             "status": False,
             "data": [],
-            "error": str(exc),
+            "error": f"extract_product_video: {str(exc)}",
         }
 
 
@@ -370,7 +520,7 @@ def extract_product_pricing_options(page_soup):
         return {
             "status": False,
             "data": [],
-            "error": str(exc),
+            "error": f"extract_product_pricing_options: {str(exc)}",
         }
 
 
@@ -393,7 +543,7 @@ def extract_product_shipping_fee(page_soup):
         return {
             "status": False,
             "data": None,
-            "error": str(exc),
+            "error": f"extract_product_shipping_fee: {str(exc)}",
         }
 
 
@@ -418,7 +568,7 @@ def extract_product_attributes(page_soup):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"extract_product_attributes: {str(exc)}",
         }
 
 
@@ -449,7 +599,7 @@ def extract_product_description_old(page_soup):
                 "description_text": None,
                 "description_image": [],
             },
-            "error": str(exc),
+            "error": f"extract_product_description_old: {str(exc)}",
         }
 
 
@@ -519,7 +669,7 @@ def extract_product_description(page_soup, driver):
                 "description_text": None,
                 "description_image": [],
             },
-            "error": str(exc),
+            "error": f"extract_product_description: {str(exc)}",
         }
 
 
@@ -598,7 +748,7 @@ def get_faq_content(driver):
         return {
             "status": False,
             "data": None,
-            "error": f"FAQ Content Extraction Error: {str(exc)}",
+            "error": f"get_faq_content: {str(exc)}",
         }
     finally:
         driver.switch_to.default_content()
@@ -672,7 +822,7 @@ def extract_customization_options(driver):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"extract_customization_options: {str(exc)}",
         }
 
 
@@ -776,7 +926,7 @@ def extract_product_variations(driver):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"extract_product_variations: {str(exc)}",
         }
 
 
@@ -824,7 +974,7 @@ def change_language_and_currency(driver, language="English", currency="USD"):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"change_language_and_currency: {str(exc)}",
         }
 
 
@@ -854,7 +1004,7 @@ def extract_product_data(url):
         shipping_region_result = shipping_region_error(page_soup)
 
         if shipping_region_result.get("status"):
-            print(f"[SHIPPING_REGION_ERROR] Detected. Attempting VPN rotation...")
+            print("[SHIPPING_REGION_ERROR] Detected. Attempting VPN rotation...")
             vpn_was_changed = True
 
             # Try each continent in the rotation list
@@ -887,15 +1037,10 @@ def extract_product_data(url):
                     print(f"[VPN_ROTATION] Failed to change language/currency: {e}")
 
                 # Reload the page
-                driver.get(url)
+                # driver.get(url)
                 time.sleep(2)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(1)
-                wait.until(
-                    lambda d: (
-                        d.execute_script("return document.readyState") == "complete"
-                    )
-                )
 
                 page_source = driver.page_source
                 page_soup = bs4.BeautifulSoup(page_source, "html.parser")
@@ -916,17 +1061,26 @@ def extract_product_data(url):
             title_result = extract_product_title(page_soup)
 
         # Extract all data
+        print("Extracted title")
         company_result = extract_product_company_name(page_soup)
+        print("Extracted company name")
         images_result = extract_product_images(page_soup)
+        print("Extracted images")
         videos_result = extract_product_video(page_soup)
+        print("Extracted videos")
         pricing_result = extract_product_pricing_options(page_soup)
+        print("Extracted pricing options")
         shipping_result = extract_product_shipping_fee(page_soup)
+        print("Extracted shipping fee")
         attributes_result = extract_product_attributes(page_soup)
+        print("Extracted attributes")
         description_result = extract_product_description(page_soup, driver)
+        print("Extracted description")
 
         variations_result = extract_product_variations(driver)
-
+        print("Extracted variations")
         faq_result = get_faq_content(driver)
+        print("Extracted FAQ content")
 
         results = {
             "product_title": title_result.get("data"),
@@ -940,6 +1094,7 @@ def extract_product_data(url):
             "product_variations_and_customization": variations_result.get("data"),
             "faq_content": faq_result.get("data"),
         }
+        print("Extracted all product data")
 
         status = all(
             result.get("status", False)
@@ -981,7 +1136,7 @@ def extract_product_data(url):
         return {
             "status": False,
             "data": {},
-            "error": str(exc),
+            "error": f"extract_product_data: {str(exc)}",
         }
     finally:
         # Reconnect to original VPN (US) if it was changed
@@ -1084,6 +1239,36 @@ def extract_company_data_by_categories(company_url):
 
     try:
         print(f"Extracting company data by categories from: {company_url}")
+
+        # If this company already has items registered in the tracking CSV,
+        # resume from the pending (unscraped) entries instead of re-scraping categories.
+        if has_items_for_company(company_url):
+            pending = get_pending_items_for_company(company_url)
+            if pending:
+                grouped = {}
+                for row in pending:
+                    cat = row.get("category") or "uncategorized"
+                    grouped.setdefault(cat, {"item_count": 0, "items": []})
+                    grouped[cat]["items"].append(
+                        {
+                            "item_name": row.get("item_name"),
+                            "item_url": row.get("item_url"),
+                        }
+                    )
+                    grouped[cat]["item_count"] = len(grouped[cat]["items"])
+
+                return {
+                    "status": True,
+                    "data": grouped,
+                    "error": "resumed_from_csv",
+                }
+            else:
+                # Company has entries but none pending
+                return {
+                    "status": True,
+                    "data": {},
+                    "error": "all_items_scraped",
+                }
         driver = create_driver()
         driver.get(company_url)
         time.sleep(2)
@@ -1155,6 +1340,20 @@ def extract_company_data_by_categories(company_url):
                     "item_count": len(category_items),
                     "items": category_items,
                 }
+                try:
+                    # Register category item URLs in tracking CSV to avoid re-scraping categories next run
+                    item_urls = [
+                        {
+                            "item_url": it.get("item_url"),
+                            "item_name": it.get("item_name"),
+                        }
+                        for it in category_items
+                        if isinstance(it, dict) and it.get("item_url")
+                    ]
+                    if item_urls:
+                        add_category_entries(company_url, "", category_name, item_urls)
+                except Exception as e:
+                    print(f"Warning: failed to add category entries to CSV: {e}")
                 print(
                     f"Extracted {len(category_items)} items for category: {category_name}"
                 )
@@ -1260,7 +1459,9 @@ def _append_log_entry(log_path, lock, status, item_name, item_url, error):
             handle.write(line)
 
 
-def _process_category_item(item_payload, category_name, output_dir, log_path, lock):
+def _process_category_item(
+    item_payload, category_name, output_dir, log_path, lock, company_url=None
+):
     """Extract a single product item and persist its data."""
     global items_processed_counter
 
@@ -1275,7 +1476,7 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         if not item_url:
             raise ValueError("missing item url")
 
-        print(f"Extracting data for item: {item_name or item_url}")
+        print(f"\n{'-' * 60}\nExtracting data for item: {item_name or item_url}")
         extraction_result = extract_product_data(item_url)
         if not extraction_result.get("status"):
             raise RuntimeError(extraction_result.get("error", "extraction failed"))
@@ -1294,6 +1495,19 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         }
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
+
+        # Mark item as scraped in CSV (store filepath as scrape_result)
+        try:
+            if company_url and item_url:
+                update_item_status(
+                    company_url,
+                    item_url,
+                    scraped=True,
+                    error=False,
+                    scrape_result=output_path,
+                )
+        except Exception:
+            pass
 
         # Increment counter and check if VPN reconnection is needed
         with vpn_counter_lock:
@@ -1320,6 +1534,18 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
     except Exception as exc:
         _append_log_entry(log_path, lock, "fail", item_name, item_url, str(exc))
         print(f"Failed to extract data for item: {item_name or item_url}")
+        try:
+            if company_url and item_url:
+                update_item_status(
+                    company_url,
+                    item_url,
+                    scraped=False,
+                    error=True,
+                    # scrape_result=str(exc),
+                    scrape_result="",
+                )
+        except Exception:
+            pass
         return {
             "status": "fail",
             "category": category_name,
@@ -1375,6 +1601,7 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
                 output_dir,
                 log_path,
                 lock,
+                company_url,
             )
             for category_name, item_payload in tasks
         ]
@@ -1410,10 +1637,10 @@ if __name__ == "__main__":
 
 
 # connect_vpn()
-# item_url = "https://www.alibaba.com/product-detail/High-Quality-Adult-Electric-Scooter-Fast_1600885974020.html"
-# item_url = "https://www.alibaba.com/product-detail/MEISU-CH-Heating-Wood-Burner-Flame_1601731765266.html?spm=a2706.7843667.normalOffer.21.51ea65a51poHRj"
+# url = "https://www.alibaba.com/product-detail/High-Quality-Adult-Electric-Scooter-Fast_1600885974020.html"
+# # item_url = "https://www.alibaba.com/product-detail/MEISU-CH-Heating-Wood-Burner-Flame_1601731765266.html?spm=a2706.7843667.normalOffer.21.51ea65a51poHRj"
 
-# data = extract_product_data(item_url)
+# data = extract_product_data(url)
 # data
 
 
