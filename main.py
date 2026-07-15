@@ -5,6 +5,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
+
 from urllib.parse import urlparse
 
 from seleniumbase import Driver
@@ -27,9 +31,27 @@ with open("settings.json", "r") as f:
 EXPRESSVPN_CMD = settings.get("EXPRESSVPN_CMD", "expressvpn")
 VPN_COUNTRY = settings.get("VPN_COUNTRY", "Netherlands").lower()
 NUMBER_OF_THREADS = int(settings.get("NUMBER_OF_THREADS", 1))
+VPN_RECONNECT_INTERVAL = int(
+    settings.get("VPN_RECONNECT_INTERVAL", 20)
+)  # Reconnect every N items
+
+# VPN continent rotation list for handling shipping region errors
+VPN_CONTINENTS = [
+    "Australia",
+    "UK",
+    "Canada",
+    "Indonesia",
+    "Kenya",
+    "Colombia",
+    "France",
+]
+
+# Global counters for VPN reconnection
+items_processed_counter = 0
+vpn_counter_lock = threading.Lock()
 
 
-def connect_vpn():
+def connect_vpn(country=VPN_COUNTRY):
     try:
 
         def run_cmd(args):
@@ -77,7 +99,7 @@ def connect_vpn():
                     columns=["country", "id"],
                 )
             except:
-                print(f"Error getting country list")
+                print("Error getting country list")
                 return False
 
         disconnect()
@@ -87,11 +109,11 @@ def connect_vpn():
             df = get_locations()
 
             rand_locations = df[
-                df.country.apply(lambda x: x.lower().startswith(VPN_COUNTRY))
+                df.country.apply(lambda x: x.lower().startswith(country.lower()))
             ].id.to_list()
 
             random_location = str(random.choice(rand_locations))
-            print(f"Connecting to : {VPN_COUNTRY}")
+            print(f"Connecting to : {country}")
 
         except:
             try:
@@ -100,15 +122,13 @@ def connect_vpn():
                         pd.read_csv("utils/express_countries.csv").id.to_list()
                     )
                 )
-                print(
-                    f"No {VPN_COUNTRY} server found. Connecting to Netherlands server"
-                )
+                print(f"No {country} server found. Connecting to Netherlands server")
             except:
                 locations = "93,208,156,209,81,162,219,192,193,194,175,238,160,114,63,152,112,80,57,224,223,133,195,174,111,137,196,197,113,198,164,190,107,154,37,58,199,108,101,128,117,88,115,243,232,91,163,45,79,169,181,245,125,131,100,246,240,144,141,247,241,132,20,142,242,244,140,95,271,19,283,288,270,276,265,273,17,302,299,304,292,306,9,294,18,172,278,284,293,275,165,277,286,290,161,272,6,70,74,71,280,291,54,202,305,285,301,26,155,168,281,75,295,289,297,94,282,296,298,204,1,207,2,300,287,166,303,25,279,274,143,126,184,185,21,307,186,85,147,110,118,124,56,78,130,34,150,153,104,8,103,136,7,92,210,102,99,106,33,129,182,157,29,188,122,119,36,12,134,120,187,189,4,16,212,146,96,32,31,86,145,127,121,211,35,22,23,203,11,201,89,53,178,5,15,263,90,87,139,84,239,105,176,248,249,109,264".split(
                     ","
                 )
                 random_location = str(random.choice(locations))
-                print(f"Connecting to Random server")
+                print("Connecting to Random server")
 
         connect(random_location)
         time.sleep(2)
@@ -191,6 +211,32 @@ def extract_data_from_result_page_item(element):
         return {
             "status": False,
             "data": {},
+            "error": str(exc),
+        }
+
+
+def shipping_region_error(page_soup):
+    PRODUCT_TITLE_ELEMENT = 'div[class="unsafe-title"]'
+    try:
+        element = page_soup.select_one(PRODUCT_TITLE_ELEMENT)
+        if element.text.lower().startswith(
+            "sorry, this product  can't  be shipped to your region"
+        ):
+            return {
+                "status": True,
+                "data": element.get_text(strip=True) if element else None,
+                "error": "Shipping region error",
+            }
+        else:
+            return {
+                "status": False,
+                "data": None,
+                "error": "none",
+            }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": None,
             "error": str(exc),
         }
 
@@ -477,6 +523,87 @@ def extract_product_description(page_soup, driver):
         }
 
 
+def get_faq_content(driver):
+    try:
+        status = False
+        error = "FAQ not available"
+        faq_data = None
+        FAQ_HEADER_ELEMENT = 'div[module-title="detailProductNavigation"]'
+        FAQ_HEADER_ELEMENT2 = 'div[data-testid="product-detail-title"]'
+
+        FAQ_DESCRIPTION_IFRAME_SELECTOR = (
+            'div[data-module-name="module_product_specification"] iframe'
+        )
+        FAQ_SECTION_ELEMENT = 'div[data-section-title="FAQ"]'
+
+        try:
+            iframe_element = driver.find_element(
+                By.CSS_SELECTOR, FAQ_DESCRIPTION_IFRAME_SELECTOR
+            )
+
+            driver.switch_to.frame(iframe_element)
+        except:
+            pass
+        iframe_html = driver.page_source
+
+        iframe_soup = bs4.BeautifulSoup(iframe_html, "html.parser")
+        faq_header_elements = iframe_soup.select(FAQ_HEADER_ELEMENT)
+        if not faq_header_elements:
+            faq_header_elements = iframe_soup.select(FAQ_HEADER_ELEMENT2)
+
+        faq_index = (
+            [i.get_text().lower() for i in faq_header_elements].index("faq")
+            if "faq" in [i.get_text().lower() for i in faq_header_elements]
+            else -1
+        )
+
+        if faq_index == -1:
+            faq_index = (
+                [i.get_text().lower() for i in faq_header_elements].index("faqs")
+                if "faqs" in [i.get_text().lower() for i in faq_header_elements]
+                else -1
+            )
+
+        if faq_index != -1:
+            faq_content = faq_header_elements[faq_index].find_next_siblings("div")
+
+            faq_data = "\n".join(
+                [
+                    faq_content_item.get_text(separator="\n", strip=True)
+                    for faq_content_item in faq_content
+                    if faq_content_item.get_text(separator="\n", strip=True)
+                ]
+            )
+
+            status = True
+            error = "none"
+        else:
+            faq_content = (
+                iframe_soup.select(FAQ_SECTION_ELEMENT)[0]
+                if iframe_soup.select(FAQ_SECTION_ELEMENT)
+                else None
+            )
+            if faq_content:
+                faq_data = faq_content.get_text(separator="\n", strip=True)
+                status = True
+                error = "none"
+
+        return {
+            "status": status,
+            "data": faq_data,
+            "error": error,
+        }
+    except Exception as exc:
+        faq_data = None
+        return {
+            "status": False,
+            "data": None,
+            "error": f"FAQ Content Extraction Error: {str(exc)}",
+        }
+    finally:
+        driver.switch_to.default_content()
+
+
 def extract_customization_options(driver):
     CUSTOM_SECTION_ELEMENT = 'div[data-auto-exp="skuCustomizationChoices"]'
     OPTION_GROUP_SELECTOR = 'div[class="id-mb-2"]'
@@ -653,9 +780,60 @@ def extract_product_variations(driver):
         }
 
 
+def change_language_and_currency(driver, language="English", currency="USD"):
+    try:
+        SAVE_BUTTON_ELEMENT = 'div[class="tnh-button"]'
+        wait = WebDriverWait(driver, 10)
+        language_currency_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, 'div[data-tnhkey="Language"]'))
+        )
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+            language_currency_button,
+        )
+        language_currency_button.click()
+        time.sleep(3)
+
+        action_chains = ActionChains(driver)
+
+        # Language.
+        # Enter language directly
+        action_chains.send_keys(language).perform()
+        time.sleep(1)
+        action_chains.send_keys(Keys.ENTER).perform()
+        time.sleep(1)
+        action_chains.send_keys(Keys.TAB).perform()
+        time.sleep(1)
+        action_chains.send_keys(currency).perform()
+        time.sleep(1)
+        action_chains.send_keys(Keys.ENTER).perform()
+        time.sleep(1)
+
+        # Save changes
+        save_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, SAVE_BUTTON_ELEMENT))
+        )
+        save_button.click()
+        time.sleep(1)
+        return {
+            "status": True,
+            "data": {},
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": {},
+            "error": str(exc),
+        }
+
+
 def extract_product_data(url):
-    """Load a product page and extract all product data."""
-    # driver = None
+    """Load a product page and extract all product data with VPN rotation for shipping region errors."""
+    driver = None
+    original_vpn_country = VPN_COUNTRY
+    vpn_was_changed = False
+
     try:
         driver = create_driver()
         driver.get(url)
@@ -672,7 +850,72 @@ def extract_product_data(url):
         page_source = driver.page_source
         page_soup = bs4.BeautifulSoup(page_source, "html.parser")
 
-        title_result = extract_product_title(page_soup)
+        # Check for shipping region error
+        shipping_region_result = shipping_region_error(page_soup)
+
+        if shipping_region_result.get("status"):
+            print(f"[SHIPPING_REGION_ERROR] Detected. Attempting VPN rotation...")
+            vpn_was_changed = True
+
+            # Try each continent in the rotation list
+            for continent_vpn in VPN_CONTINENTS:
+                print(f"[VPN_ROTATION] Trying continent: {continent_vpn}")
+
+                # Change VPN to the continent
+                vpn_success = connect_vpn(continent_vpn)
+                if not vpn_success:
+                    print(
+                        f"[VPN_ROTATION] Failed to connect to {continent_vpn}, skipping..."
+                    )
+                    continue
+
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+                driver = create_driver()
+                driver.get(url)
+                time.sleep(1)
+
+                # Change language and currency
+                try:
+                    change_language_and_currency(
+                        driver, language="English", currency="USD"
+                    )
+                except Exception as e:
+                    print(f"[VPN_ROTATION] Failed to change language/currency: {e}")
+
+                # Reload the page
+                driver.get(url)
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1)
+                wait.until(
+                    lambda d: (
+                        d.execute_script("return document.readyState") == "complete"
+                    )
+                )
+
+                page_source = driver.page_source
+                page_soup = bs4.BeautifulSoup(page_source, "html.parser")
+
+                # Check if we can extract the title successfully
+                title_result = extract_product_title(page_soup)
+                if title_result.get("status") and title_result.get("data"):
+                    print(
+                        f"[VPN_ROTATION] Success with {continent_vpn}! Product title extracted."
+                    )
+                    break
+                else:
+                    print(
+                        f"[VPN_ROTATION] Failed with {continent_vpn}. Trying next continent..."
+                    )
+        else:
+            # No shipping region error, proceed normally
+            title_result = extract_product_title(page_soup)
+
+        # Extract all data
         company_result = extract_product_company_name(page_soup)
         images_result = extract_product_images(page_soup)
         videos_result = extract_product_video(page_soup)
@@ -682,6 +925,8 @@ def extract_product_data(url):
         description_result = extract_product_description(page_soup, driver)
 
         variations_result = extract_product_variations(driver)
+
+        faq_result = get_faq_content(driver)
 
         results = {
             "product_title": title_result.get("data"),
@@ -693,19 +938,20 @@ def extract_product_data(url):
             "product_attributes": attributes_result.get("data"),
             "product_description": description_result.get("data"),
             "product_variations_and_customization": variations_result.get("data"),
+            "faq_content": faq_result.get("data"),
         }
 
         status = all(
             result.get("status", False)
             for result in [
                 title_result,
-                company_result,
+                # company_result,
                 images_result,
                 pricing_result,
-                shipping_result,
-                attributes_result,
-                description_result,
-                variations_result,
+                # shipping_result,
+                # attributes_result,
+                # description_result,
+                # variations_result,
             ]
         )
 
@@ -723,6 +969,7 @@ def extract_product_data(url):
             ]
             if result.get("status") is False
         ]
+
         error = "; ".join(errors) if errors else "none"
 
         return {
@@ -737,10 +984,19 @@ def extract_product_data(url):
             "error": str(exc),
         }
     finally:
+        # Reconnect to original VPN (US) if it was changed
+        if vpn_was_changed:
+            try:
+                print(
+                    f"[VPN_ROTATION] Reconnecting to original VPN: {original_vpn_country.upper()}"
+                )
+                connect_vpn(original_vpn_country)
+            except Exception as e:
+                print(f"[VPN_ROTATION] Failed to reconnect to original VPN: {e}")
+
         if driver:
             try:
                 driver.quit()
-                pass
             except Exception:
                 pass
 
@@ -1006,6 +1262,8 @@ def _append_log_entry(log_path, lock, status, item_name, item_url, error):
 
 def _process_category_item(item_payload, category_name, output_dir, log_path, lock):
     """Extract a single product item and persist its data."""
+    global items_processed_counter
+
     item_name = None
     item_url = None
 
@@ -1036,6 +1294,19 @@ def _process_category_item(item_payload, category_name, output_dir, log_path, lo
         }
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
+
+        # Increment counter and check if VPN reconnection is needed
+        with vpn_counter_lock:
+            items_processed_counter += 1
+            current_count = items_processed_counter
+
+            if current_count % VPN_RECONNECT_INTERVAL == 0:
+                print(f"\n[VPN] Processed {current_count} items. Reconnecting VPN...")
+                try:
+                    connect_vpn(VPN_COUNTRY)
+                    print(f"[VPN] Reconnection completed at item {current_count}")
+                except Exception as vpn_error:
+                    print(f"[VPN] Reconnection error: {vpn_error}")
 
         _append_log_entry(log_path, lock, "success", item_name, item_url, "none")
         print(f"Data extracted successfully for item: {item_name or item_url}")
@@ -1136,3 +1407,14 @@ if __name__ == "__main__":
         all_results.append({"company_url": company_url, "result": item_result})
 
     print(json.dumps(all_results, indent=2, ensure_ascii=False))
+
+
+# connect_vpn()
+# item_url = "https://www.alibaba.com/product-detail/High-Quality-Adult-Electric-Scooter-Fast_1600885974020.html"
+# item_url = "https://www.alibaba.com/product-detail/MEISU-CH-Heating-Wood-Burner-Flame_1601731765266.html?spm=a2706.7843667.normalOffer.21.51ea65a51poHRj"
+
+# data = extract_product_data(item_url)
+# data
+
+
+# get_faq_content(driver)
