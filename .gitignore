@@ -1,5 +1,5 @@
 .venv/
 __pycache__/
 extracted_data/
-*/companies.txt
+companies.txt
 scrape_tracking.csv

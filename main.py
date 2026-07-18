@@ -24,6 +24,7 @@ import csv
 from pathlib import Path
 
 import random
+from inputimeout import inputimeout, TimeoutOccurred
 
 
 ## read settings.json
@@ -205,6 +206,10 @@ def add_category_entries(company_url, category, item_urls, path=TRACKING_CSV_PAT
     item_urls: iterable of item_url strings
     """
     df = load_tracking_df(path)
+    existing_item_urls = {
+        str(url).strip().lower()
+        for url in df["item_url"].fillna("").astype(str).str.strip()
+    }
     new_rows = []
     for item in item_urls:
         # support either simple item_url strings or dicts with item_url/item_name
@@ -218,20 +223,26 @@ def add_category_entries(company_url, category, item_urls, path=TRACKING_CSV_PAT
         if not item_url:
             continue
 
-        if not (
-            (df["company_url"] == company_url) & (df["item_url"] == item_url)
-        ).any():
-            new_rows.append(
-                {
-                    "company_url": company_url,
-                    "item_name": item_name,
-                    "category": category,
-                    "item_url": item_url,
-                    "scrape_status": False,
-                    "error": False,
-                    "scrape_result": "",
-                }
-            )
+        normalized_item_url = str(item_url).strip()
+        if not normalized_item_url:
+            continue
+
+        normalized_item_url_key = normalized_item_url.lower()
+        if normalized_item_url_key in existing_item_urls:
+            continue
+
+        existing_item_urls.add(normalized_item_url_key)
+        new_rows.append(
+            {
+                "company_url": company_url,
+                "item_name": item_name,
+                "category": category,
+                "item_url": normalized_item_url,
+                "scrape_status": False,
+                "error": False,
+                "scrape_result": "",
+            }
+        )
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
         save_tracking_df(df, path)
@@ -1162,6 +1173,7 @@ def click_next_pagination_btn(driver):
                 (By.CSS_SELECTOR, 'button[class*="next-pagination-item next"]')
             )
         )
+        LOADING_SPINNER_ELEMENT = (By.CSS_SELECTOR, 'div[class="next-loading-tip"]')
 
         disabled_attr = next_btn.get_attribute("disabled")
         btn_classes = (next_btn.get_attribute("class") or "").lower()
@@ -1176,8 +1188,21 @@ def click_next_pagination_btn(driver):
             "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
             next_btn,
         )
+        time.sleep(1)
         next_btn.click()
         time.sleep(2)
+        retry = 0
+        loading_ = True
+        while loading_ and retry < 2:
+            try:
+                wait.until(EC.visibility_of_element_located(**LOADING_SPINNER_ELEMENT))
+                break
+            except Exception:
+                retry += 1
+                loading_ = False
+                time.sleep(1)
+        time.sleep(1)
+
         return {
             "status": True,
             "error": "none",
@@ -1197,7 +1222,8 @@ def extract_categories(driver):
             EC.presence_of_all_elements_located(
                 (
                     By.CSS_SELECTOR,
-                    'div[module-title="productGroups"] li[role="menuitem"]',
+                    # 'div[module-title="productGroups"] li[role="menuitem"]',
+                    'div[module-title="productGroups"] li',
                 )
             )
         )
@@ -1229,7 +1255,7 @@ def get_page_soup(driver):
     return bs4.BeautifulSoup(driver.page_source, "html.parser")
 
 
-def extract_company_data_by_categories(company_url):
+def extract_company_data_by_categories(company_url, retry_input=None):
     """Scrape product items for each category on a company listing page."""
     driver = None
     collected_data = {}
@@ -1239,7 +1265,7 @@ def extract_company_data_by_categories(company_url):
 
         # If this company already has items registered in the tracking CSV,
         # resume from the pending (unscraped) entries instead of re-scraping categories.
-        if has_items_for_company(company_url):
+        if has_items_for_company(company_url) and str(retry_input) != "1":
             pending = get_pending_items_for_company(company_url)
             if pending:
                 grouped = {}
@@ -1428,6 +1454,9 @@ def load_company_urls():
             for fragment in re.split(r"[\n,]+", line):
                 candidate = fragment.strip().strip("\"'")
                 if candidate.startswith(("http://", "https://")):
+                    # if url does not end with /productlist.html add it to the end
+                    if not candidate.endswith("/productlist.html"):
+                        candidate += "/productlist.html"
                     urls.append(candidate)
 
     return list(dict.fromkeys(urls))
@@ -1639,7 +1668,18 @@ if __name__ == "__main__":
     all_results = []
     for company_url in company_urls:
         print(f"Processing company: {company_url}")
-        category_result = extract_company_data_by_categories(company_url)
+        # ask for retry(1) and continue after 10 seconds if no input
+        try:
+            retry_input = inputimeout(
+                "Press 2 to skip rescrape items from product page: ", timeout=10
+            )
+        except TimeoutOccurred:
+            print("No input received, rescraping...")
+            retry_input = "1"
+
+        category_result = extract_company_data_by_categories(
+            company_url, retry_input=retry_input
+        )
         item_result = extract_company_items_data(
             category_result, company_url=company_url
         )
@@ -1649,11 +1689,7 @@ if __name__ == "__main__":
 
 
 # connect_vpn()
-# url = "https://www.alibaba.com/product-detail/High-Quality-Adult-Electric-Scooter-Fast_1600885974020.html"
-# # item_url = "https://www.alibaba.com/product-detail/MEISU-CH-Heating-Wood-Burner-Flame_1601731765266.html?spm=a2706.7843667.normalOffer.21.51ea65a51poHRj"
 
-# data = extract_product_data(url)
-# data
-
+# company_urls = load_company_urls()
 # company_url = company_urls[0]
 # get_faq_content(driver)
