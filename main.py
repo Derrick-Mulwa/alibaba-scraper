@@ -986,6 +986,32 @@ def change_language_and_currency(driver, language="English", currency="USD"):
         }
 
 
+def accept_cookies(driver):
+    """Accept cookies if the cookie consent banner is present."""
+    try:
+        COOKIE_BUTTON_SELECTOR = 'div[class="gdpr-btn gdpr-agree-btn"]'
+        wait = WebDriverWait(driver, 3)
+        cookie_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, COOKIE_BUTTON_SELECTOR))
+        )
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+            cookie_button,
+        )
+        cookie_button.click()
+        return {
+            "status": True,
+            "data": {},
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": {},
+            "error": f"accept_cookies: {str(exc)}",
+        }
+
+
 def extract_product_data(url):
     """Load a product page and extract all product data with VPN rotation for shipping region errors."""
     driver = None
@@ -997,6 +1023,9 @@ def extract_product_data(url):
         driver.get(url)
 
         # scroll_to_bottom
+        # accept cookies
+        accept_cookies(driver)
+
         time.sleep(2)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
@@ -1253,6 +1282,29 @@ def get_page_soup(driver):
     except Exception:
         pass
     return bs4.BeautifulSoup(driver.page_source, "html.parser")
+
+
+def extract_company_name_profile_page(driver):
+    try:
+        COMPANY_NAME_ELEMENT = 'h2[class="cp-name"]'
+        wait = WebDriverWait(driver, 10)
+        company_name_element = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, COMPANY_NAME_ELEMENT))
+        )
+        company_name = (
+            company_name_element.text.strip() if company_name_element else "None"
+        )
+        return {
+            "status": True,
+            "data": company_name,
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": None,
+            "error": f"extract_company_name_profile_page: {str(exc)}",
+        }
 
 
 def extract_company_data_by_categories(company_url, retry_input=None):
@@ -1658,8 +1710,8 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
     return results
 
 
-if __name__ == "__main__":
-    # if __name__ != "__main__":
+# if __name__ == "__main__":
+if __name__ != "__main__":
     company_urls = load_company_urls()
     if not company_urls:
         raise SystemExit("No company URLs found in companies.txt")
