@@ -1566,13 +1566,11 @@ def process_first_pending_url(server_ip=SERVER_IP):
     item_url = claim_result["item_url"]
     item_name = claim_result.get("item_name") or item_url
     print(
-        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"Item received from DB: {item_name} ({item_url})"
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]: Item received from DB: {item_name}) : ({item_url})"
     )
     update_server_status("scraping", item_name)
     print(
-        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"Scraping started: {item_name} ({item_url})"
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]: Scraping started: {item_name}"
     )
     try:
         extraction_result = extract_product_data(item_url)
@@ -1586,12 +1584,12 @@ def process_first_pending_url(server_ip=SERVER_IP):
     if extraction_result.get("status"):
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"Scraping succeeded: {item_name} ({item_url})"
+            f"✅ Scraping succeeded: {item_name}"
         )
     else:
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"Scraping failed: {item_name} ({item_url}) - "
+            f"❌ Scraping failed: {item_name} ({item_url}) - "
             f"{extraction_result.get('error') or 'unknown error'}"
         )
 
