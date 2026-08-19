@@ -90,7 +90,7 @@ VPN_CONNECTION_WATCHDOG_STOP = threading.Event()
 
 
 def _load_telegram_chat_ids():
-    file_path = os.path.join(os.path.dirname(__file__), "chat_ids.txt")
+    file_path = os.path.join(os.path.dirname(__file__), "utils/chat_ids.txt")
     chat_ids = set()
     try:
         with open(file_path, "r", encoding="utf-8") as handle:

@@ -5,3 +5,4 @@ companies.txt
 scrape_tracking.csv
 server.txt
 downloaded_files
+utils/chat_ids.txt
