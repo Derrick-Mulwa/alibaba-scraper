@@ -22,22 +22,30 @@ import subprocess
 import bs4
 import csv
 from pathlib import Path
+import mysql.connector
 
 import random
 from inputimeout import inputimeout, TimeoutOccurred
 
 
 ## read settings.json
-with open("settings.json", "r") as f:
+with open("utils/settings.json", "r") as f:
     settings = json.load(f)
 
 EXPRESSVPN_CMD = settings.get("EXPRESSVPN_CMD", "expressvpn")
 VPN_COUNTRY = settings.get("VPN_COUNTRY", "Netherlands").lower()
 NUMBER_OF_THREADS = int(settings.get("NUMBER_OF_THREADS", 1))
 VPN_RECONNECT_INTERVAL = int(
-    settings.get("VPN_RECONNECT_INTERVAL", 20)
+    settings.get("VPN_RECONNECT_INTERVAL", 5)
 )  # Reconnect every N items
 TRACKING_CSV_PATH = os.path.abspath("./utils/scrape_tracking.csv")
+DATABASE_SETTINGS = settings.get("DATABASE", {})
+DB_RETRY_ATTEMPTS = 5
+DB_RETRY_DELAY_SECONDS = 1
+SERVER_FILE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "utils", "server.txt"
+)
+
 
 # VPN continent rotation list for handling shipping region errors
 VPN_CONTINENTS = [
@@ -53,6 +61,29 @@ VPN_CONTINENTS = [
 # Global counters for VPN reconnection
 items_processed_counter = 0
 vpn_counter_lock = threading.Lock()
+
+
+def get_server_ip(path=SERVER_FILE_PATH):
+    """Load the server IP from utils/server.txt, prompting when it is missing."""
+    server_path = Path(path)
+    server_ip = ""
+
+    try:
+        server_ip = server_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pass
+
+    while not server_ip:
+        server_ip = input("Enter server IP: ").strip()
+        if not server_ip:
+            print("Server IP cannot be blank.")
+
+    server_path.parent.mkdir(parents=True, exist_ok=True)
+    server_path.write_text(server_ip + "\n", encoding="utf-8")
+    return server_ip
+
+
+SERVER_IP = get_server_ip()
 
 
 def connect_vpn(country=VPN_COUNTRY):
@@ -141,6 +172,148 @@ def connect_vpn(country=VPN_COUNTRY):
         return False
 
 
+def connect_db():
+    db_settings = DATABASE_SETTINGS
+    return mysql.connector.connect(
+        host=db_settings.get("DB_HOST", "localhost"),
+        user=db_settings.get("DB_USER", "root"),
+        password=db_settings.get("DB_PASSWORD", ""),
+        database=db_settings.get("DB_NAME", "oneapp"),
+    )
+
+
+def update_server_status(server_action, server_action_details, server_ip=SERVER_IP):
+    """Update an existing server status or create one for a new server."""
+
+    def save_status_action():
+        connection = connect_db()
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                UPDATE server_status
+                SET server_action = %s,
+                    server_action_details = %s,
+                    date_time = UTC_TIMESTAMP()
+                WHERE server_ip = %s
+                """,
+                (server_action, server_action_details, server_ip),
+            )
+
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    """
+                    INSERT INTO server_status
+                        (server_ip, server_action, server_action_details)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (server_ip, server_action, server_action_details),
+                )
+
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    return execute_db_with_retry(save_status_action)
+
+
+def get_first_pending_url(server_ip=SERVER_IP):
+    """Atomically claim and return the first available item URL for a server."""
+
+    def get_url_action():
+        connection = connect_db()
+        cursor = None
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT id, item_url, item_name
+                FROM scrape_tracking
+                WHERE server_ip = %s
+                  AND LOWER(TRIM(scrape_status)) = 'pending'
+                ORDER BY id ASC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (server_ip,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT id, item_url, item_name
+                    FROM scrape_tracking
+                    WHERE scrape_status IS NULL
+                       OR LOWER(TRIM(scrape_status)) = 'none'
+                    ORDER BY id ASC
+                    LIMIT 1
+                    FOR UPDATE
+                    """
+                )
+                row = cursor.fetchone()
+
+            if row is None:
+                connection.commit()
+                return {"status": False, "item_url": None}
+
+            record_id, item_url, item_name = row
+            cursor.execute(
+                """
+                UPDATE scrape_tracking
+                SET scrape_status = 'pending', server_ip = %s, date_time = UTC_TIMESTAMP()
+                WHERE id = %s
+                """,
+                (server_ip, record_id),
+            )
+            connection.commit()
+            return {
+                "status": True,
+                "item_url": item_url,
+                "item_name": item_name,
+            }
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    for attempt in range(3):
+        result = execute_db_with_retry(get_url_action)
+        if result.get("status"):
+            return result
+        if attempt < 2:
+            time.sleep(DB_RETRY_DELAY_SECONDS)
+
+    return result
+
+
+def execute_db_with_retry(db_action, *args, **kwargs):
+    """Execute a database action, retrying the complete action on failure."""
+    last_error = None
+    for attempt in range(1, DB_RETRY_ATTEMPTS + 1):
+        try:
+            return db_action(*args, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"Database action attempt {attempt}/{DB_RETRY_ATTEMPTS} failed: {exc}"
+            )
+            if attempt < DB_RETRY_ATTEMPTS:
+                time.sleep(DB_RETRY_DELAY_SECONDS)
+
+    raise last_error
+
+
 def init_tracking_csv(path=TRACKING_CSV_PATH):
     path = Path(path)
     if not path.exists():
@@ -200,19 +373,12 @@ def save_tracking_df(df, path=TRACKING_CSV_PATH):
     df.to_csv(path, index=False, encoding="utf-8")
 
 
-def add_category_entries(company_url, category, item_urls, path=TRACKING_CSV_PATH):
-    """Add rows for category items if not already present.
-
-    item_urls: iterable of item_url strings
-    """
-    df = load_tracking_df(path)
-    existing_item_urls = {
-        str(url).strip().lower()
-        for url in df["item_url"].fillna("").astype(str).str.strip()
-    }
-    new_rows = []
+def add_category_entries(
+    company_url, company_name, category, item_urls, path=TRACKING_CSV_PATH
+):
+    """Save category items to the database without duplicating item URLs."""
+    items = []
     for item in item_urls:
-        # support either simple item_url strings or dicts with item_url/item_name
         if isinstance(item, dict):
             item_url = item.get("item_url") or item.get("url")
             item_name = item.get("item_name") or item.get("name") or ""
@@ -220,32 +386,72 @@ def add_category_entries(company_url, category, item_urls, path=TRACKING_CSV_PAT
             item_url = item
             item_name = ""
 
-        if not item_url:
-            continue
+        normalized_item_url = str(item_url or "").strip()
+        if normalized_item_url:
+            items.append(
+                {
+                    "item_url": normalized_item_url,
+                    "item_name": str(item_name or "").strip(),
+                }
+            )
 
-        normalized_item_url = str(item_url).strip()
-        if not normalized_item_url:
-            continue
+    def save_entries_action():
+        connection = connect_db()
+        cursor = None
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor()
 
-        normalized_item_url_key = normalized_item_url.lower()
-        if normalized_item_url_key in existing_item_urls:
-            continue
+            if company_name is not None:
+                cursor.execute(
+                    "UPDATE companies SET company_name = %s WHERE company_url = %s",
+                    (company_name, company_url),
+                )
 
-        existing_item_urls.add(normalized_item_url_key)
-        new_rows.append(
-            {
-                "company_url": company_url,
-                "item_name": item_name,
-                "category": category,
-                "item_url": normalized_item_url,
-                "scrape_status": False,
-                "error": False,
-                "scrape_result": "",
-            }
-        )
-    if new_rows:
-        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-        save_tracking_df(df, path)
+            if items:
+                item_urls = list(dict.fromkeys(item["item_url"] for item in items))
+                placeholders = ", ".join(["%s"] * len(item_urls))
+                cursor.execute(
+                    f"SELECT item_url FROM scrape_tracking WHERE item_url IN ({placeholders})",
+                    item_urls,
+                )
+                existing_item_urls = {row[0] for row in cursor.fetchall()}
+                new_items = []
+                seen_item_urls = set(existing_item_urls)
+                for item in items:
+                    if item["item_url"] not in seen_item_urls:
+                        new_items.append(item)
+                        seen_item_urls.add(item["item_url"])
+
+                if new_items:
+                    cursor.executemany(
+                        """
+                        INSERT INTO scrape_tracking
+                            (company_url, item_name, item_url, category)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        [
+                            (
+                                company_url,
+                                item["item_name"],
+                                item["item_url"],
+                                category,
+                            )
+                            for item in new_items
+                        ],
+                    )
+
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    return execute_db_with_retry(save_entries_action)
 
 
 def update_item_status(
@@ -1120,6 +1326,7 @@ def extract_product_data(url):
         # print("Extracted FAQ content")
 
         results = {
+            "product_url": url,
             "product_title": title_result.get("data"),
             "company_name": company_result.get("data"),
             "product_images": images_result.get("data"),
@@ -1191,6 +1398,127 @@ def extract_product_data(url):
                 driver.quit()
             except Exception:
                 pass
+
+
+def process_first_pending_url(server_ip=SERVER_IP):
+    """Claim, extract, and persist the first available product URL."""
+    print(
+        "============================================================================================="
+    )
+    claim_result = get_first_pending_url(server_ip)
+    if not claim_result.get("status"):
+        return claim_result
+
+    item_url = claim_result["item_url"]
+    item_name = claim_result.get("item_name") or item_url
+    print(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"Item received from DB: {item_name} ({item_url})"
+    )
+    update_server_status("scraping", item_name)
+    print(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"Scraping started: {item_name} ({item_url})"
+    )
+    try:
+        extraction_result = extract_product_data(item_url)
+    except Exception as exc:
+        extraction_result = {
+            "status": False,
+            "data": {},
+            "error": str(exc),
+        }
+
+    if extraction_result.get("status"):
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"Scraping succeeded: {item_name} ({item_url})"
+        )
+    else:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"Scraping failed: {item_name} ({item_url}) - "
+            f"{extraction_result.get('error') or 'unknown error'}"
+        )
+
+    scrape_error = extraction_result.get("error") or "NONE"
+    scrape_result_json = json.dumps(
+        extraction_result.get("data", {}), ensure_ascii=False
+    )
+
+    def save_result_action():
+        connection = connect_db()
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                UPDATE scrape_tracking
+                SET scrape_status = 'completed',
+                    error_message = %s,
+                    date_time = UTC_TIMESTAMP(),
+                    scrape_result = %s
+                WHERE item_url = %s
+                  AND server_ip = %s
+                  AND LOWER(TRIM(scrape_status)) = 'pending'
+                """,
+                (scrape_error, scrape_result_json, item_url, server_ip),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    saved = execute_db_with_retry(save_result_action)
+    return {
+        "status": saved,
+        "item_url": item_url,
+        "scrape_status": "completed" if saved else "pending",
+        "error": scrape_error,
+        "scrape_result": extraction_result.get("data", {}),
+    }
+
+
+def run_process_first_pending_url(max_retries=3, server_ip=SERVER_IP):
+    """Process pending items continuously until three consecutive failures."""
+    failed_attempts = 0
+
+    while failed_attempts < max_retries:
+        try:
+            result = process_first_pending_url(server_ip=server_ip)
+        except Exception as exc:
+            result = {"status": False, "error": str(exc)}
+
+        if result.get("status"):
+            failed_attempts = 0
+
+            global items_processed_counter
+            with vpn_counter_lock:
+                items_processed_counter += 1
+                current_count = items_processed_counter
+
+            if current_count % VPN_RECONNECT_INTERVAL == 0:
+                print(f"\n[VPN] Processed {current_count} items. Reconnecting VPN...")
+                try:
+                    connect_vpn(VPN_COUNTRY)
+                    print(f"[VPN] Reconnection completed at item {current_count}")
+                except Exception as vpn_error:
+                    print(f"[VPN] Reconnection error: {vpn_error}")
+
+            continue
+
+        failed_attempts += 1
+        print(
+            f"Process attempt failed ({failed_attempts}/{max_retries}): "
+            f"{result.get('error') or 'no pending item or unknown error'}"
+        )
+
+    print(f"Stopping after {max_retries} consecutive failed attempts.")
 
 
 def click_next_pagination_btn(driver):
@@ -1307,7 +1635,7 @@ def extract_company_name_profile_page(driver):
         }
 
 
-def extract_company_data_by_categories(company_url, retry_input=None):
+def extract_company_data_by_categories_old(company_url, retry_input=None):
     """Scrape product items for each category on a company listing page."""
     driver = None
     collected_data = {}
@@ -1426,9 +1754,165 @@ def extract_company_data_by_categories(company_url, retry_input=None):
                             if isinstance(it, dict) and it.get("item_url")
                         ]
                         if item_urls:
-                            add_category_entries(company_url, category_name, item_urls)
+                            add_category_entries(
+                                company_url, None, category_name, item_urls
+                            )
                     except Exception as e:
                         print(f"Warning: failed to add category entries to CSV: {e}")
+                    print(
+                        f"Extracted {len(category_items)} items for category: {category_name}"
+                    )
+                    break
+                except Exception as exc:
+                    attempt += 1
+                    print(
+                        f"Attempt {attempt}/3 failed for category {category_name}: {exc}"
+                    )
+                    if attempt >= 3:
+                        collected_data[category_name] = {
+                            "item_count": 0,
+                            "items": [],
+                            "error": str(exc),
+                        }
+                        print(
+                            f"Failed to extract items for category: {category_name}. Error: {exc}"
+                        )
+                    else:
+                        try:
+                            driver.get(company_url)
+                            time.sleep(2)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                        continue
+
+            try:
+                driver.get(company_url)
+                time.sleep(2)
+            except Exception:
+                pass
+
+        return {
+            "status": True,
+            "data": collected_data,
+            "error": "none",
+        }
+    except Exception as exc:
+        return {
+            "status": False,
+            "data": {},
+            "error": str(exc),
+        }
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def extract_company_data_by_categories(company_url, retry_input=None):
+    """Scrape product items for each category on a company listing page."""
+    driver = None
+    collected_data = {}
+
+    try:
+        print(f"Extracting company data by categories from: {company_url}")
+
+        driver = create_driver()
+        driver.get(company_url)
+        time.sleep(2)
+
+        categories_result = extract_categories(driver)
+        if not categories_result.get("status"):
+            return {
+                "status": False,
+                "data": {},
+                "error": categories_result.get("error", "failed to extract categories"),
+            }
+
+        company_name_data = extract_company_name_profile_page(driver)
+        if company_name_data.get("status"):
+            company_name = company_name_data.get("data")
+            print(f"Extracted company name: {company_name}")
+        else:
+            company_name = None
+            print(f"Failed to extract company name for URL: {company_url}")
+
+        category_names = list(categories_result.get("data", {}).keys())
+        if not category_names:
+            return {
+                "status": False,
+                "data": {},
+                "error": "no categories found",
+            }
+
+        for category_name in category_names:
+            attempt = 0
+            while attempt < 3:
+                try:
+                    print(f"Extracting items for category: {category_name}")
+                    refreshed_categories = extract_categories(driver)
+                    if not refreshed_categories.get("status"):
+                        raise RuntimeError(
+                            refreshed_categories.get(
+                                "error", "failed to refresh categories"
+                            )
+                        )
+
+                    category_element = refreshed_categories.get("data", {}).get(
+                        category_name
+                    )
+                    if category_element is None:
+                        raise RuntimeError("category element not found")
+
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+                        category_element,
+                    )
+                    category_element.click()
+                    time.sleep(2)
+
+                    category_items = []
+                    while True:
+                        page_soup = get_page_soup(driver)
+                        items_result = extract_result_items_from_soup(page_soup)
+                        if items_result.get("status"):
+                            for item in items_result.get("data", []):
+                                extracted_item = extract_data_from_result_page_item(
+                                    item
+                                )
+                                if extracted_item.get("status"):
+                                    category_items.append(extracted_item.get("data"))
+                                else:
+                                    category_items.append(
+                                        {"error": extracted_item.get("error")}
+                                    )
+
+                        next_result = click_next_pagination_btn(driver)
+                        if not next_result.get("status"):
+                            break
+
+                    collected_data[category_name] = {
+                        "item_count": len(category_items),
+                        "items": category_items,
+                    }
+                    try:
+                        # Register category item URLs in tracking database to avoid re-scraping categories next run
+                        item_urls = [
+                            {
+                                "item_url": it.get("item_url"),
+                                "item_name": it.get("item_name"),
+                            }
+                            for it in category_items
+                            if isinstance(it, dict) and it.get("item_url")
+                        ]
+                        if item_urls:
+                            add_category_entries(
+                                company_url, company_name, category_name, item_urls
+                            )
+                    except Exception as e:
+                        print(f"Warning: failed to add category entries to db: {e}")
                     print(
                         f"Extracted {len(category_items)} items for category: {category_name}"
                     )
@@ -1489,7 +1973,7 @@ def _safe_name(value, fallback="item"):
     return cleaned[:80] or fallback
 
 
-def load_company_urls():
+def load_company_urls_old():
     """Load company URLs from companies.txt."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     companies_path = os.path.join(base_dir, "companies.txt")
@@ -1512,6 +1996,52 @@ def load_company_urls():
                     urls.append(candidate)
 
     return list(dict.fromkeys(urls))
+
+
+def load_company_urls():
+    """Load company URLs from the companies database table."""
+
+    def load_urls_action():
+        connection = connect_db()
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT company_url FROM companies ORDER BY date_time DESC, id DESC"
+            )
+            urls = []
+            for (company_url,) in cursor.fetchall():
+                if company_url:
+                    candidate = str(company_url).strip()
+                    if candidate and not candidate.endswith("/productlist.html"):
+                        candidate += "/productlist.html"
+                    if candidate:
+                        urls.append(candidate)
+            return list(dict.fromkeys(urls))
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    try:
+        return execute_db_with_retry(load_urls_action)
+    except Exception as exc:
+        print(f"Error loading company URLs from database: {exc}")
+        return []
+
+
+def extract_all_compnaies_items():
+    """Extract category items for all companies, newest companies first."""
+    company_urls = load_company_urls()
+    results = []
+
+    for company_url in company_urls:
+        print(f"Processing company: {company_url}")
+        result = extract_company_data_by_categories(company_url)
+        results.append({"company_url": company_url, "result": result})
+        print(f"Finished processing company: {company_url}\n{'=' * 60}\n")
+
+    return results
 
 
 def _company_slug_from_url(company_url):
@@ -1710,11 +2240,10 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
     return results
 
 
-if __name__ == "__main__":
-    # if __name__ != "__main__":
+if __name__ == "__main__i":
     company_urls = load_company_urls()
     if not company_urls:
-        raise SystemExit("No company URLs found in companies.txt")
+        raise SystemExit("No company URLs found in companies table")
 
     connect_vpn()
     all_results = []
@@ -1739,9 +2268,15 @@ if __name__ == "__main__":
 
     print(json.dumps(all_results, indent=2, ensure_ascii=False))
 
+    # connect_vpn()
 
-# connect_vpn()
+    # company_urls = load_company_urls()
+    # company_url = company_urls[0]
+    # get_faq_content(driver)
 
-# company_urls = load_company_urls()
-# company_url = company_urls[0]
-# get_faq_content(driver)
+    # extract_all_compnaies_items()
+
+    process_first_pending_url(server_ip=SERVER_IP)
+
+if __name__ == "__main__":
+    run_process_first_pending_url()

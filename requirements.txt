@@ -3,3 +3,4 @@ seleniumbase
 pandas
 curl-cffi
 inputimeout
+mysql-connector-python

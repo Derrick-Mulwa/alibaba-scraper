@@ -1,0 +1,13 @@
+{
+  "EXPRESSVPN_CMD": "C:\\Program Files (x86)\\ExpressVPN\\services\\ExpressVPN.CLI.exe",
+  "VPN_COUNTRY": "USA",
+  "NUMBER_OF_THREADS": 1,
+  "VPN_RECONNECT_INTERVAL": 5,
+  "DATABASE": {
+    "DB_HOST": "localhost",
+    "DB_USER": "root",
+    "DB_PASSWORD": "root101.",
+    "DB_NAME": "alibaba",
+    "SERVER_IP": "51.77.216.17"
+  }
+}
