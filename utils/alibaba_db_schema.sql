@@ -34,3 +34,10 @@ CREATE TABLE
         server_action_details VARCHAR(5000),
         date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+CREATE TABLE
+    IF NOT EXISTS server_details (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        server_ip VARCHAR(50),
+        server_name VARCHAR(5000)
+    );

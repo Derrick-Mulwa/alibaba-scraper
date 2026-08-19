@@ -3,8 +3,9 @@
   "VPN_COUNTRY": "USA",
   "NUMBER_OF_THREADS": 1,
   "VPN_RECONNECT_INTERVAL": 5,
+  "TELEGRAM_BOT_TOKEN": "8614239465:AAFhSr_pNcfuI0kP4mJxw2SmCCBVDbL6Oh0",
   "DATABASE": {
-    "DB_HOST": "localhost",
+    "DB_HOST": "68.183.208.150",
     "DB_USER": "root",
     "DB_PASSWORD": "root101.",
     "DB_NAME": "alibaba",

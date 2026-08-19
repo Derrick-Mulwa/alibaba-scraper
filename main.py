@@ -84,10 +84,141 @@ def get_server_ip(path=SERVER_FILE_PATH):
 
 
 SERVER_IP = get_server_ip()
+VPN_CONNECTION_STATUS = "none"
+VPN_CONNECTION_WATCHDOG = None
+VPN_CONNECTION_WATCHDOG_STOP = threading.Event()
+
+
+def _load_telegram_chat_ids():
+    file_path = os.path.join(os.path.dirname(__file__), "chat_ids.txt")
+    chat_ids = set()
+    try:
+        with open(file_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                value = line.strip()
+                if value:
+                    chat_ids.add(value)
+    except FileNotFoundError:
+        pass
+    return file_path, sorted(chat_ids)
+
+
+def _sync_telegram_chat_ids(bot_token):
+    file_path, existing_ids = _load_telegram_chat_ids()
+    existing_set = set(existing_ids)
+
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates", timeout=15
+        )
+        response.raise_for_status()
+        for update in (response.json() or {}).get("result", []):
+            chat = (
+                (update.get("message") or {}).get("chat")
+                or (update.get("edited_message") or {}).get("chat")
+                or {}
+            )
+            chat_id = chat.get("id")
+            if chat_id is not None:
+                existing_set.add(str(chat_id))
+    except Exception as exc:
+        print(f"Telegram update sync failed: {exc}")
+
+    if existing_set:
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(sorted(existing_set)) + "\n")
+    return sorted(existing_set)
+
+
+def _get_server_name(server_ip=SERVER_IP):
+    connection = None
+    cursor = None
+    try:
+        connection = connect_db()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT server_name
+            FROM server_details
+            WHERE server_ip = %s
+              AND server_name IS NOT NULL
+              AND TRIM(server_name) <> ''
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (server_ip,),
+        )
+        row = cursor.fetchone()
+        return str(row[0]).strip() if row and row[0] else None
+    except Exception as exc:
+        print(f"Server name lookup failed: {exc}")
+        return None
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None:
+            connection.close()
+
+
+def _send_telegram_message():
+    bot_token = settings.get("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        print("Telegram bot token not configured. Skipping VPN alert.")
+        return
+
+    chat_ids = _sync_telegram_chat_ids(bot_token)
+    if not chat_ids:
+        return
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    server_name = _get_server_name()
+    message = (
+        f"Server {SERVER_IP}: {server_name or 'unknown name server'} "
+        "has issue with vpn connection."
+    )
+    for chat_id in chat_ids:
+        try:
+            response = requests.post(
+                url, data={"chat_id": chat_id, "text": message}, timeout=15
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            print(f"Telegram message failed for chat_id {chat_id}: {exc}")
+
+
+def _watch_vpn_connection_status():
+    global VPN_CONNECTION_STATUS, VPN_CONNECTION_WATCHDOG
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if VPN_CONNECTION_WATCHDOG_STOP.is_set():
+            VPN_CONNECTION_WATCHDOG = None
+            return
+        if VPN_CONNECTION_STATUS == "connected":
+            VPN_CONNECTION_WATCHDOG = None
+            return
+        time.sleep(1)
+
+    if VPN_CONNECTION_STATUS == "connecting":
+        _send_telegram_message()
+        VPN_CONNECTION_STATUS = "none"
+
+    VPN_CONNECTION_WATCHDOG = None
+    VPN_CONNECTION_WATCHDOG_STOP.clear()
 
 
 def connect_vpn(country=VPN_COUNTRY):
+    global VPN_CONNECTION_STATUS, VPN_CONNECTION_WATCHDOG, VPN_CONNECTION_WATCHDOG_STOP
+
     try:
+        VPN_CONNECTION_STATUS = "connecting"
+        VPN_CONNECTION_WATCHDOG_STOP.clear()
+        if VPN_CONNECTION_WATCHDOG is not None and VPN_CONNECTION_WATCHDOG.is_alive():
+            VPN_CONNECTION_WATCHDOG_STOP.set()
+        VPN_CONNECTION_WATCHDOG = threading.Thread(
+            target=_watch_vpn_connection_status, daemon=True
+        )
+        VPN_CONNECTION_WATCHDOG.start()
 
         def run_cmd(args):
             result = subprocess.run(
@@ -167,8 +298,12 @@ def connect_vpn(country=VPN_COUNTRY):
 
         connect(random_location)
         time.sleep(2)
+        VPN_CONNECTION_STATUS = "connected"
+        VPN_CONNECTION_WATCHDOG_STOP.set()
         return True
     except:
+        VPN_CONNECTION_STATUS = "none"
+        VPN_CONNECTION_WATCHDOG_STOP.set()
         return False
 
 
