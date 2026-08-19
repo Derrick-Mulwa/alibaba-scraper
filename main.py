@@ -819,6 +819,7 @@ def extract_product_video(page_soup):
 def extract_product_pricing_options(page_soup):
     PRICING_OPTIONS_ELEMENT = 'div[class="price-item"]'
     PRICING_OPTION_ELEMENT = 'div[data-testid="ladder-price"]'
+    PRICING_RANGE_ELEMENT = 'div[data-testid="range-price"]'
 
     SHILLING_ELEMENT = 'span[class*="id-font-bold"]'
     CENTS_ELEMENT = 'span[class*="id-font-semibold"]'
@@ -860,6 +861,24 @@ def extract_product_pricing_options(page_soup):
                     "price": price,
                 }
             )
+
+        if not pricing_options:
+            range_element = page_soup.select_one(PRICING_RANGE_ELEMENT)
+
+            if range_element:
+                # price is in the first span, quantity = element text - price text
+                price_span = range_element.select_one("span")
+                price = price_span.get_text(strip=True) if price_span else None
+                quantity_text = range_element.get_text(strip=True)
+
+                num_pieces = quantity_text.replace(price, "").strip()
+                pricing_options.append(
+                    {
+                        "num_pieces": num_pieces,
+                        "price": price,
+                    }
+                )
+
         return {
             "status": True,
             "data": pricing_options,
