@@ -2414,4 +2414,5 @@ if __name__ == "__main__i":
     process_first_pending_url(server_ip=SERVER_IP)
 
 if __name__ == "__main__":
+    connect_vpn(country=VPN_COUNTRY)
     run_process_first_pending_url()
