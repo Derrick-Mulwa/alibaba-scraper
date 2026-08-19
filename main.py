@@ -1350,7 +1350,7 @@ def accept_cookies(driver):
     """Accept cookies if the cookie consent banner is present."""
     try:
         COOKIE_BUTTON_SELECTOR = 'div[class="gdpr-btn gdpr-agree-btn"]'
-        wait = WebDriverWait(driver, 3)
+        wait = WebDriverWait(driver, 15)
         cookie_button = wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, COOKIE_BUTTON_SELECTOR))
         )
