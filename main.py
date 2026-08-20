@@ -2233,10 +2233,14 @@ def load_company_urls():
 
 def extract_all_compnaies_items():
     """Extract category items for all companies, newest companies first."""
+    connect_vpn(country=VPN_COUNTRY)
+
     company_urls = load_company_urls()
     results = []
 
     for company_url in company_urls:
+        connect_vpn(country=VPN_COUNTRY)
+
         print(f"Processing company: {company_url}")
         result = extract_company_data_by_categories(company_url)
         results.append({"company_url": company_url, "result": result})
