@@ -586,7 +586,15 @@ def add_category_entries(
                 cursor.close()
             connection.close()
 
-    return execute_db_with_retry(save_entries_action)
+    result = execute_db_with_retry(save_entries_action)
+    try:
+        update_server_status(
+            "scraping company items",
+            f"{company_name or 'Unknown company'} : {category}",
+        )
+    except Exception as exc:
+        print(f"Warning: failed to update server status for category {category}: {exc}")
+    return result
 
 
 def update_item_status(
@@ -1971,11 +1979,38 @@ def extract_company_data_by_categories(company_url, retry_input=None):
     try:
         print(f"Extracting company data by categories from: {company_url}")
 
-        driver = create_driver()
-        driver.get(company_url)
-        time.sleep(2)
+        categories_result = {
+            "status": False,
+            "data": [],
+            "error": "no categories found",
+        }
+        for attempt in range(1, 6):
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
-        categories_result = extract_categories(driver)
+            driver = create_driver()
+            driver.get(company_url)
+            time.sleep(2)
+            categories_result = extract_categories(driver)
+            category_data = categories_result.get("data")
+            category_names = (
+                list(category_data.keys()) if isinstance(category_data, dict) else []
+            )
+            if categories_result.get("status") and category_names:
+                break
+
+            print(
+                f"Category extraction attempt {attempt}/5 failed: "
+                f"{categories_result.get('error', 'no categories found')}"
+            )
+
+        category_data = categories_result.get("data")
+        category_names = (
+            list(category_data.keys()) if isinstance(category_data, dict) else []
+        )
         if not categories_result.get("status"):
             return {
                 "status": False,
@@ -2159,7 +2194,21 @@ def load_company_urls():
         try:
             cursor = connection.cursor()
             cursor.execute(
-                "SELECT company_url FROM companies ORDER BY date_time DESC, id DESC"
+                """
+                SELECT company_url
+                FROM companies AS companies
+                ORDER BY
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM scrape_tracking AS tracking
+                            WHERE tracking.company_url = companies.company_url
+                        ) THEN 1
+                        ELSE 0
+                    END ASC,
+                    companies.date_time DESC,
+                    companies.id DESC
+                """
             )
             urls = []
             for (company_url,) in cursor.fetchall():
@@ -2391,44 +2440,6 @@ def extract_company_items_data(extracted_company_data_by_categories, company_url
 
     return results
 
-
-if __name__ == "__main__i":
-    company_urls = load_company_urls()
-    if not company_urls:
-        raise SystemExit("No company URLs found in companies table")
-
-    connect_vpn()
-    all_results = []
-    for company_url in company_urls:
-        print(f"Processing company: {company_url}")
-        # ask for retry(1) and continue after 10 seconds if no input
-        try:
-            retry_input = inputimeout(
-                "Press 2 to skip rescrape items from product page: ", timeout=10
-            )
-        except TimeoutOccurred:
-            print("No input received, rescraping...")
-            retry_input = "1"
-
-        category_result = extract_company_data_by_categories(
-            company_url, retry_input=retry_input
-        )
-        item_result = extract_company_items_data(
-            category_result, company_url=company_url
-        )
-        all_results.append({"company_url": company_url, "result": item_result})
-
-    print(json.dumps(all_results, indent=2, ensure_ascii=False))
-
-    # connect_vpn()
-
-    # company_urls = load_company_urls()
-    # company_url = company_urls[0]
-    # get_faq_content(driver)
-
-    # extract_all_compnaies_items()
-
-    process_first_pending_url(server_ip=SERVER_IP)
 
 if __name__ == "__main__":
     connect_vpn(country=VPN_COUNTRY)
